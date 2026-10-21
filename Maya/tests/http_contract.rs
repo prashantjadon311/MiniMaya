@@ -527,7 +527,7 @@ async fn test_x33_export_endpoint_rejects_mismatch_then_consumes_exact_approval(
 
 #[tokio::test]
 async fn test_x41_workspace_task_payloads_roundtrip_through_real_handlers() {
-    let (_dir, app) = app().await;
+    let (dir, app) = app().await;
     let auth = authenticated(&app).await;
     let due_at = 1_798_070_400_000_i64;
     let (status, created) = auth
@@ -616,6 +616,26 @@ async fn test_x41_workspace_task_payloads_roundtrip_through_real_handlers() {
         .await;
     assert_eq!(status, 201, "{model}");
     assert_eq!(model["data"]["context_limit_bytes"], 32768);
+    let model_id = model["data"]["id"].as_str().unwrap();
+    let (status, roles) = auth.request("GET", "/model-roles", None, None).await;
+    assert_eq!(status, 200, "{roles}");
+    let mut bindings = roles["data"]["bindings"].as_array().unwrap().clone();
+    let chat = bindings
+        .iter_mut()
+        .find(|binding| binding["role"] == "chat")
+        .unwrap();
+    chat["model_id"] = Value::String(model_id.to_string());
+    let (status, saved_roles) = auth
+        .request(
+            "PUT",
+            "/model-roles",
+            Some(serde_json::json!({
+                "revision":roles["data"]["revision"],"bindings":bindings
+            })),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{saved_roles}");
     let (status, secret_status) = auth
         .request(
             "POST",
@@ -627,6 +647,110 @@ async fn test_x41_workspace_task_payloads_roundtrip_through_real_handlers() {
     assert_eq!(status, 200, "{secret_status}");
     assert_eq!(secret_status["data"]["credential_status"], "session");
     assert!(!secret_status.to_string().contains("test-only-credential"));
+
+    let (status, current) = auth.request("GET", "/settings", None, None).await;
+    assert_eq!(status, 200, "{current}");
+    let (status, voice_saved) = auth
+        .request(
+            "PATCH",
+            "/settings",
+            Some(serde_json::json!({
+                "revision":current["data"]["revision"],
+                "voice":{"stt":"disabled","stt_model_id":null,"tts":"browser",
+                    "tts_model_id":null,"voice":"default","input_device":"fixture-mic",
+                    "output_device":"fixture-speaker","rate":1.1,"muted":false,"language":"hindi"}
+            })),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{voice_saved}");
+    assert_eq!(voice_saved["data"]["voice"]["input_device"], "fixture-mic");
+    let (status, system_saved) = auth
+        .request(
+            "PATCH",
+            "/settings",
+            Some(serde_json::json!({
+                "revision":voice_saved["data"]["revision"],
+                "assistant":{"timezone":"Asia/Kolkata","work_days":[1,2,3,4,5],
+                    "work_start":"09:30","work_end":"18:30","checkin_minutes":90,
+                    "daily_review_time":"17:45","notifications":true,
+                    "report_delivery":"in_app_and_notification"},
+                "security":{"require_plan_approval":true,"critical_always_confirm":true,
+                    "chat_retention_days":91,"event_retention_days":366,
+                    "artifact_retention_days":31,"backup_keep":8,"storage_cap_bytes":900000000},
+                "browser":{"enabled":false,"executable":"/usr/bin/chromium",
+                    "profile_dir":null,"cdp_mode":"disabled","cdp_url":null}
+            })),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{system_saved}");
+    assert_eq!(system_saved["data"]["assistant"]["checkin_minutes"], 90);
+    assert_eq!(system_saved["data"]["security"]["backup_keep"], 8);
+
+    let project_root = dir.path().join("workspace-project");
+    std::fs::create_dir(&project_root).unwrap();
+    let (status, project) = auth
+        .request(
+            "POST",
+            "/projects",
+            Some(
+                serde_json::json!({"name":"Workspace fixture","root":project_root,
+                "allowed_paths":[],"excluded_paths":[],"notes":"fixture",
+                "preferred_model_id":null,"preferred_tool_id":null,"owner_ack":true}),
+            ),
+            None,
+        )
+        .await;
+    assert_eq!(status, 201, "{project}");
+    let project_id = project["data"]["id"].as_str().unwrap();
+    let tool_id = uuid::Uuid::new_v4();
+    let (status, invalid_tool) = auth
+        .request(
+            "PUT",
+            &format!("/tools/{tool_id}"),
+            Some(serde_json::json!({"revision":0,"kind":"Editor",
+                "executable":"/usr/bin/true","enabled":true})),
+            None,
+        )
+        .await;
+    assert_eq!(status, 400, "{invalid_tool}");
+    assert_eq!(invalid_tool["error"]["code"], "INVALID_REQUEST");
+    let (status, tool) = auth
+        .request(
+            "PUT",
+            &format!("/tools/{tool_id}"),
+            Some(serde_json::json!({"revision":0,"kind":"editor",
+                "executable":"/usr/bin/true","enabled":true})),
+            None,
+        )
+        .await;
+    if status != 200 {
+        let (_, tools) = auth.request("GET", "/tools?limit=50", None, None).await;
+        panic!("tool mutation failed: {tool}; stored tools: {tools}");
+    }
+    let (status, command) = auth
+        .request(
+            "POST",
+            "/commands",
+            Some(
+                serde_json::json!({"project_id":project_id,"label":"True fixture",
+                "executable":"/usr/bin/true","args":[],"timeout_ms":10000,
+                "network":false,"enabled":true,"kind":"test","owner_ack":true}),
+            ),
+            None,
+        )
+        .await;
+    assert_eq!(status, 201, "{command}");
+    let (status, backup) = auth
+        .request("POST", "/backups", Some(serde_json::json!({})), None)
+        .await;
+    assert_eq!(status, 201, "{backup}");
+    assert_eq!(backup["data"]["state"], "verified");
+    for path in ["/capabilities", "/system/resources", "/backups?limit=50"] {
+        let (status, body) = auth.request("GET", path, None, None).await;
+        assert_eq!(status, 200, "{path}: {body}");
+    }
 
     let (status, report) = auth
         .request(
@@ -715,6 +839,21 @@ async fn feature_a02_external_chat_returns_persisted_job_before_provider_finishe
         .await;
     assert_eq!(status, 201, "{conversation}");
     let conversation_id = conversation["data"]["id"].as_str().unwrap();
+    let stream_response = auth
+        .router
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/api/v1/events?after=0")
+                .header("host", &auth.host)
+                .header("authorization", format!("Bearer {}", auth.bearer))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stream_response.status(), 200);
+    let mut event_body = stream_response.into_body();
     let started = std::time::Instant::now();
     let (status, receipt) = auth
         .request(
@@ -759,6 +898,21 @@ async fn feature_a02_external_chat_returns_persisted_job_before_provider_finishe
         .expect("job-linked assistant response");
     assert_eq!(response.text, "async reply");
     assert_eq!(response.model_id, Some(model.id));
+
+    let mut streamed = String::new();
+    let stream_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !streamed.contains("\"state\":\"completed\"") {
+        let frame = tokio::time::timeout_at(stream_deadline, event_body.frame())
+            .await
+            .expect("live job-state event timeout")
+            .expect("event stream ended")
+            .expect("event stream body error");
+        if let Ok(data) = frame.into_data() {
+            streamed.push_str(std::str::from_utf8(&data).unwrap());
+        }
+    }
+    assert!(streamed.contains("\"state\":\"executing\""));
+    assert!(streamed.contains(job_id.to_string().as_str()));
 
     provider_task.abort();
 }

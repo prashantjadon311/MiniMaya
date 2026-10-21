@@ -48,6 +48,17 @@ if [[ -z "$launch" ]]; then
   exit 1
 fi
 
+launch_metadata="$scratch/runtime/launch.json"
+test -s "$launch_metadata"
+[[ "$(stat -c '%a' "$launch_metadata")" == '600' ]]
+grep -q '"port"' "$launch_metadata"
+grep -q '"pid"' "$launch_metadata"
+grep -q '"started_at"' "$launch_metadata"
+if grep -Eq 'bootstrap|session|csrf|token' "$launch_metadata"; then
+  echo 'smoke: launch metadata contains forbidden credential material' >&2
+  exit 1
+fi
+
 base=${launch%%/#bootstrap=*}
 bootstrap=${launch##*#bootstrap=}
 health=$(curl --silent --show-error --fail --max-time 5 "$base/api/v1/health")
@@ -87,4 +98,5 @@ fi
 wait "$pid"
 pid=''
 test -s "$scratch/data/maya.sqlite3"
+test ! -e "$launch_metadata"
 echo 'smoke: PASS (startup, health, bootstrap, authenticated settings, graceful shutdown)'

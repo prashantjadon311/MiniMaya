@@ -23,6 +23,8 @@ export async function mount(container){
   const messages=el('div'),form=el('form'),input=el('textarea',{name:'message',placeholder:'Message Maya','aria-label':'Message Maya'}),submit=el('button',{type:'submit'},'Send'),voice=el('button',{type:'button','aria-label':'Hold to talk'},'Hold to talk');
   form.append(input,voice,submit);container.append(messages,form);
   let conversation,settings,capturing=false;
+  const pendingJobs=new Map();
+  const terminal=new Set(['completed','completed_with_issues','blocked','failed','cancelled','needs_reconciliation']);
   try{
     const [page,currentSettings]=await Promise.all([request('GET','/conversations?limit=50'),request('GET','/settings')]);
     settings=currentSettings.voice;
@@ -48,9 +50,30 @@ export async function mount(container){
   voice.addEventListener('keydown',event=>{if((event.key===' '||event.key==='Enter')&&!event.repeat)beginVoice(event)});
   voice.addEventListener('keyup',event=>{if(event.key===' '||event.key==='Enter')endVoice(event)});
 
+  const refreshJob=async jobId=>{
+    if(!pendingJobs.has(jobId))return;
+    const detail=await request('GET',`/jobs/${encodeURIComponent(jobId)}`);
+    const state=detail.job.state,pending=pendingJobs.get(jobId);
+    pending.textContent=`Assistant job: ${state.replaceAll('_',' ')}`;
+    if(!terminal.has(state))return;
+    if(state==='completed'||state==='completed_with_issues'){
+      const history=await request('GET',`/conversations/${conversation.id}/messages?limit=100`);
+      messages.replaceChildren(...history.items.map(renderMessage));
+    }else{
+      pending.className='error';
+      pending.textContent=`Assistant response ${state.replaceAll('_',' ')}. Open Activity for recovery details.`;
+    }
+    pendingJobs.delete(jobId);
+  };
+  const onMayaEvent=event=>{
+    const jobId=event.detail?.job_id;
+    if(jobId&&pendingJobs.has(jobId))refreshJob(jobId).catch(error=>showError(messages,error));
+  };
+  addEventListener('maya:event',onMayaEvent);
+
   form.addEventListener('submit',async event=>{
     event.preventDefault();if(!input.value.trim())return;submit.disabled=true;
-    try{const text=input.value,inputReceipt=await send(text,conversation.id);renderReceipt(messages,conversation,inputReceipt);input.value=''}catch(error){showError(messages,error)}finally{submit.disabled=false}
+    try{const text=input.value,inputReceipt=await send(text,conversation.id);renderReceipt(messages,conversation,inputReceipt);input.value='';if(inputReceipt.job_id){const pending=el('p',{class:'muted'},'Assistant job: queued');messages.append(pending);pendingJobs.set(inputReceipt.job_id,pending);await refreshJob(inputReceipt.job_id)}}catch(error){showError(messages,error)}finally{submit.disabled=false}
   });
-  return()=>{stopVoice()};
+  return()=>{removeEventListener('maya:event',onMayaEvent);stopVoice()};
 }

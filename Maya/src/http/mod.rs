@@ -323,8 +323,8 @@ async fn finish_idempotency(
     digest: &Digest,
     response: Response,
 ) -> Result<Response> {
-    let status = response.status();
-    let headers = response.headers().clone();
+    let mut status = response.status();
+    let mut headers = response.headers().clone();
     let bytes = to_bytes(response.into_body(), 1024 * 1024)
         .await
         .map_err(|_| {
@@ -333,8 +333,31 @@ async fn finish_idempotency(
                 "Response exceeds idempotency storage limit",
             )
         })?;
-    let text = String::from_utf8(bytes.to_vec())
+    let mut text = String::from_utf8(bytes.to_vec())
         .map_err(|_| AppError::new(ErrorCode::Internal, "JSON response was not UTF-8"))?;
+    if serde_json::from_str::<serde_json::Value>(&text).is_err() {
+        let error = if status.is_client_error() {
+            AppError::new(
+                ErrorCode::InvalidRequest,
+                "Request body failed schema validation",
+            )
+        } else {
+            AppError::new(
+                ErrorCode::IntegrityFailure,
+                "Mutation handler returned an invalid response",
+            )
+        };
+        status = error.status();
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        text = serde_json::to_string(&ApiErrorEnvelope {
+            error: error.public_error(),
+            meta: ApiMeta::new(Uuid::new_v4()),
+        })
+        .map_err(|encode| AppError::new(ErrorCode::Internal, encode.to_string()))?;
+    }
     let sid = session_id.to_string();
     let key = key.to_string();
     let hash = digest.to_hex();

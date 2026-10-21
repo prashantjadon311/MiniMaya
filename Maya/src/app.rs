@@ -35,7 +35,7 @@ use rustix::fs::{FlockOperation, flock};
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -67,6 +67,13 @@ enum ControlResponse {
     Link { url: String, expires_at: i64 },
     Status { ready: bool, port: u16 },
     Error { code: ErrorCode, message: String },
+}
+
+#[derive(Serialize)]
+struct LaunchMetadata {
+    port: u16,
+    pid: u32,
+    started_at: i64,
 }
 
 impl App {
@@ -172,6 +179,7 @@ impl App {
             artifacts.clone(),
             files.clone(),
             conversations.clone(),
+            events.clone(),
         ));
         let assistant = Arc::new(AssistantService::new(
             conversations.clone(),
@@ -219,6 +227,7 @@ impl App {
         }));
         state.workflow.recover().await?;
         state.workflow.resume_safe_chat_jobs().await?;
+        write_launch_metadata(&config.launch_json_path(), state.auth.port())?;
         Ok(Self {
             state,
             listener,
@@ -275,6 +284,7 @@ impl App {
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), scheduler_task).await;
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), control_task).await;
         let _ = std::fs::remove_file(config.control_socket_path());
+        let _ = std::fs::remove_file(config.launch_json_path());
         drop(_instance_lock);
         Ok(())
     }
@@ -289,6 +299,37 @@ impl App {
             .map_err(|error| AppError::new(ErrorCode::Internal, error.to_string()))?;
         serve_control_listener(listener, self.state.clone(), cancel).await
     }
+}
+
+fn write_launch_metadata(path: &Path, port: u16) -> Result<()> {
+    let metadata = LaunchMetadata {
+        port,
+        pid: std::process::id(),
+        started_at: chrono::Utc::now().timestamp_millis(),
+    };
+    let bytes = serde_json::to_vec(&metadata)
+        .map_err(|error| AppError::new(ErrorCode::Internal, error.to_string()))?;
+    let temporary = path.with_extension(format!("json.{}.tmp", uuid::Uuid::new_v4()));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temporary)
+        .map_err(|error| {
+            AppError::new(ErrorCode::Internal, "Failed to create launch metadata")
+                .with_source(error)
+        })?;
+    file.write_all(&bytes).map_err(|error| {
+        AppError::new(ErrorCode::Internal, "Failed to write launch metadata").with_source(error)
+    })?;
+    file.sync_all().map_err(|error| {
+        AppError::new(ErrorCode::Internal, "Failed to sync launch metadata").with_source(error)
+    })?;
+    std::fs::rename(&temporary, path).map_err(|error| {
+        let _ = std::fs::remove_file(&temporary);
+        AppError::new(ErrorCode::Internal, "Failed to publish launch metadata").with_source(error)
+    })?;
+    Ok(())
 }
 
 async fn serve_control_listener(

@@ -1,5 +1,6 @@
 use crate::approval::{ApprovalRequest, ApprovalService};
 use crate::artifacts::{ArtifactInput, ArtifactStore};
+use crate::audit::EventHub;
 use crate::auth::SessionContext;
 use crate::coding::CodingService;
 use crate::conversation::ConversationService;
@@ -43,6 +44,7 @@ pub struct WorkflowEngine {
     artifacts: Arc<ArtifactStore>,
     files: Arc<FileService>,
     conversations: Arc<ConversationService>,
+    events: Arc<EventHub>,
     transient: Arc<Mutex<std::collections::HashMap<Id, Zeroizing<Vec<u8>>>>>,
     active: Arc<Mutex<std::collections::HashMap<Id, CancellationToken>>>,
 }
@@ -59,6 +61,7 @@ impl WorkflowEngine {
         artifacts: Arc<ArtifactStore>,
         files: Arc<FileService>,
         conversations: Arc<ConversationService>,
+        events: Arc<EventHub>,
     ) -> Self {
         Self {
             db,
@@ -70,6 +73,7 @@ impl WorkflowEngine {
             artifacts,
             files,
             conversations,
+            events,
             transient: Arc::new(Mutex::new(std::collections::HashMap::new())),
             active: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
@@ -1611,7 +1615,8 @@ impl WorkflowEngine {
         let state = enum_text(state)?;
         let verification = enum_text(verification)?;
         let now = chrono::Utc::now().timestamp_millis();
-        self.db
+        let job = self
+            .db
             .write(move |tx| {
                 let changed = tx
                     .execute(
@@ -1625,7 +1630,9 @@ impl WorkflowEngine {
                 tx.query_row("SELECT * FROM jobs WHERE id=?1", params![id.to_string()], parse_job)
                     .map_err(db_error)
             })
-            .await
+            .await?;
+        self.publish_job_state(&job);
+        Ok(job)
     }
 
     async fn begin_step(&self, job_id: Id, kind: &str, idempotent: bool) -> Result<Id> {
@@ -1804,7 +1811,11 @@ impl WorkflowEngine {
                 .map_err(db_error)?;
                 Ok(())
             })
-            .await
+            .await?;
+        if let Ok(job) = self.get(id).await {
+            self.publish_job_state(&job);
+        }
+        Ok(())
     }
 
     pub async fn recover(&self) -> Result<RecoverySummary> {
@@ -1839,14 +1850,30 @@ impl WorkflowEngine {
     async fn set_state(&self, id: Id, revision: Revision, state: JobState) -> Result<Job> {
         let state_text = enum_text(state)?;
         let now = chrono::Utc::now().timestamp_millis();
-        self.db.write(move |tx| {
+        let job = self.db.write(move |tx| {
             let changed = tx.execute(
                 "UPDATE jobs SET state=?1,revision=revision+1,updated_at=?2 WHERE id=?3 AND revision=?4",
                 params![state_text,now,id.to_string(),revision],
             ).map_err(db_error)?;
             if changed != 1 { return Err(AppError::new(ErrorCode::StaleRevision,"Job revision changed")); }
             tx.query_row("SELECT * FROM jobs WHERE id=?1",params![id.to_string()],parse_job).map_err(db_error)
-        }).await
+        }).await?;
+        self.publish_job_state(&job);
+        Ok(job)
+    }
+
+    fn publish_job_state(&self, job: &Job) {
+        self.events.publish(StreamEvent {
+            seq: 0,
+            kind: "job_state".to_string(),
+            job_id: Some(job.id),
+            at: job.updated_at,
+            data: WhitelistedEventData::Job {
+                state: job.state,
+                revision: job.revision,
+                step_id: None,
+            },
+        });
     }
 
     async fn next_plan_revision(&self, id: Id) -> Result<Revision> {

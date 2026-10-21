@@ -92,11 +92,7 @@ impl ProviderRegistry {
                         _ => BillingMode::Unknown,
                     };
 
-                    let credential_status = if secret_ref.is_some() {
-                        CredentialStatus::Session
-                    } else {
-                        CredentialStatus::Missing
-                    };
+                    let credential_status = credential_status_from_ref(secret_ref.as_deref());
 
                     let id = Uuid::parse_str(&id_str).map_err(|e| {
                         rusqlite::Error::FromSqlConversionFailure(
@@ -168,11 +164,7 @@ impl ProviderRegistry {
                         _ => BillingMode::Unknown,
                     };
 
-                    let credential_status = if secret_ref.is_some() {
-                        CredentialStatus::Session
-                    } else {
-                        CredentialStatus::Missing
-                    };
+                    let credential_status = credential_status_from_ref(secret_ref.as_deref());
 
                     let id = Uuid::parse_str(&id_str).map_err(|e| {
                         rusqlite::Error::FromSqlConversionFailure(
@@ -1350,6 +1342,16 @@ impl ProviderRegistry {
                 Ok(())
             })
             .await
+    }
+}
+
+fn credential_status_from_ref(reference: Option<&str>) -> CredentialStatus {
+    match reference {
+        Some("keyring") => CredentialStatus::Keyring,
+        Some("session") => CredentialStatus::Session,
+        Some(value) if value.starts_with("keyring:") => CredentialStatus::Keyring,
+        Some(value) if value.starts_with("session:") => CredentialStatus::Session,
+        _ => CredentialStatus::Missing,
     }
 }
 

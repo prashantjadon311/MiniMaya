@@ -207,16 +207,15 @@ pub async fn secret_write(
         ));
     }
     state.providers.get_provider(p.id).await?;
+    let mode = body.mode;
     let credential_status = state
         .secrets
         .put(p.id, SecretString::new(body.secret), body.mode)
         .await?;
-    let reference = match credential_status {
-        CredentialStatus::Session => "session",
-        CredentialStatus::Keyring => "keyring",
-        CredentialStatus::Missing => "missing",
-    }
-    .to_string();
+    let reference = match mode {
+        SecretMode::Session => format!("session:{}", p.id),
+        SecretMode::Keyring => format!("keyring:{}", p.id),
+    };
     state.db.write(move|tx|{tx.execute("UPDATE providers SET secret_ref=?1,credential_generation=credential_generation+1,revision=revision+1,updated_at=?2 WHERE id=?3",params![reference,now(),p.id.to_string()]).map_err(db_error)?;Ok(())}).await?;
     Ok(ApiResponse::ok(SecretStatus { credential_status }))
 }
@@ -1459,13 +1458,60 @@ fn parse_command(row: &Row<'_>) -> rusqlite::Result<CommandSpec> {
 }
 async fn create_command(state: &AppState, body: CommandInput) -> Result<CommandSpec> {
     require_ack(body.owner_ack)?;
-    if body.network
+    if body.label.trim().is_empty()
+        || body.label.len() > 120
+        || body.timeout_ms < 1_000
+        || body.timeout_ms > 1_200_000
+        || body.network
         || body.args.len() > 64
         || body.args.iter().map(String::len).sum::<usize>() > 8192
     {
         return Err(AppError::new(
             ErrorCode::ActionDenied,
-            "Command network access or argv exceeds the allowed contract",
+            "Command label, timeout, network policy, or argv is outside the allowed contract",
+        ));
+    }
+    let executable = PathBuf::from(&body.executable);
+    let metadata = std::fs::metadata(&executable).map_err(|_| {
+        AppError::new(
+            ErrorCode::UnsupportedCapability,
+            "Command executable was not found",
+        )
+    })?;
+    if !executable.is_absolute()
+        || !metadata.is_file()
+        || metadata.permissions().mode() & 0o111 == 0
+    {
+        return Err(AppError::new(
+            ErrorCode::ActionDenied,
+            "Command executable must be an absolute executable file",
+        ));
+    }
+    let program = executable
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let forbidden_program = matches!(
+        program,
+        "sh" | "bash"
+            | "dash"
+            | "zsh"
+            | "fish"
+            | "sudo"
+            | "su"
+            | "doas"
+            | "rm"
+            | "apt"
+            | "apt-get"
+            | "dpkg"
+            | "snap"
+            | "flatpak"
+    );
+    let forbidden_git = program == "git" && body.args.first().is_some_and(|arg| arg == "push");
+    if forbidden_program || forbidden_git {
+        return Err(AppError::new(
+            ErrorCode::ActionDenied,
+            "Shells, privilege tools, installers, deletion tools, and Git push are unavailable",
         ));
     }
     state.projects.get(body.project_id).await?;

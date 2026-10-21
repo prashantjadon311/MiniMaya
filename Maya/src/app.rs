@@ -85,6 +85,11 @@ impl App {
         db.migrate().await?;
         db.write(|tx| {
             tx.execute(
+                "UPDATE providers SET secret_ref=NULL,credential_generation=credential_generation+1,revision=revision+1 WHERE secret_ref='session' OR secret_ref LIKE 'session:%'",
+                [],
+            )
+            .map_err(|error| AppError::new(ErrorCode::DbUnavailable, error.to_string()))?;
+            tx.execute(
                 "UPDATE idempotency_keys SET state='uncertain' WHERE state='pending'",
                 [],
             )

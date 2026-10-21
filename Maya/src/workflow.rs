@@ -383,6 +383,16 @@ impl WorkflowEngine {
         operation: Operation,
         actor: Actor,
     ) -> Result<OperationReceipt> {
+        if let Operation::Launch {
+            app,
+            tool_id,
+            project_id,
+            folder,
+            url,
+        } = &operation
+        {
+            validate_launch_request(&self.db, *app, *tool_id, *project_id, folder, url).await?;
+        }
         let (action, project_id) = match &operation {
             Operation::Command { command_id } => {
                 let (project_id, kind) = self.command_binding(*command_id).await?;
@@ -2301,7 +2311,24 @@ fn operation_preview(operation: &Operation) -> String {
                 ""
             }
         ),
-        Operation::Launch { app, .. } => format!("Launch {app:?}"),
+        Operation::Launch {
+            app,
+            tool_id,
+            project_id,
+            folder,
+            url,
+        } => {
+            let target = url
+                .as_deref()
+                .or(folder.as_deref())
+                .map(|value| format!(" target={value}"))
+                .unwrap_or_default();
+            let tool = tool_id.map(|id| format!(" tool={id}")).unwrap_or_default();
+            let project = project_id
+                .map(|id| format!(" project={id}"))
+                .unwrap_or_default();
+            format!("Launch {app:?}{target}{tool}{project}")
+        }
         Operation::Command { command_id } => format!("Run registered command {command_id}"),
         Operation::ClipboardRead {} => "Read the system clipboard".to_string(),
         Operation::ClipboardWrite { text } => {
@@ -2313,6 +2340,74 @@ fn operation_preview(operation: &Operation) -> String {
             size_bytes, mode, ..
         } => format!("Upload {size_bytes} bytes for {mode:?}"),
     }
+}
+
+async fn validate_launch_request(
+    db: &Db,
+    app: LaunchAppTarget,
+    tool_id: Option<Id>,
+    project_id: Option<Id>,
+    folder: &Option<String>,
+    url: &Option<String>,
+) -> Result<()> {
+    match app {
+        LaunchAppTarget::Browser => {
+            let value = url.as_deref().ok_or_else(|| {
+                AppError::new(ErrorCode::InvalidRequest, "Browser launch requires a URL")
+            })?;
+            let parsed = url::Url::parse(value)
+                .map_err(|_| AppError::new(ErrorCode::InvalidRequest, "Browser URL is invalid"))?;
+            if !matches!(parsed.scheme(), "http" | "https")
+                || !parsed.username().is_empty()
+                || parsed.password().is_some()
+            {
+                return Err(AppError::new(
+                    ErrorCode::ScopeDenied,
+                    "Browser launch permits only credential-free HTTP(S) URLs",
+                ));
+            }
+        }
+        LaunchAppTarget::Editor | LaunchAppTarget::InstalledTool => {
+            let id = tool_id.ok_or_else(|| {
+                AppError::new(
+                    ErrorCode::InvalidRequest,
+                    "A registered tool is required for this launch",
+                )
+            })?;
+            let expected_kind = if app == LaunchAppTarget::Editor {
+                "editor"
+            } else {
+                "installed_tool"
+            };
+            let found = db
+                .read(move |conn| {
+                    conn.query_row(
+                        "SELECT kind,enabled FROM tools WHERE id=?1",
+                        params![id.to_string()],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                    )
+                    .optional()
+                    .map_err(db_error)
+                })
+                .await?;
+            let Some((kind, enabled)) = found else {
+                return Err(AppError::new(ErrorCode::NotFound, "Launch tool not found"));
+            };
+            if enabled == 0 || (expected_kind == "editor" && kind != expected_kind) {
+                return Err(AppError::new(
+                    ErrorCode::ActionDenied,
+                    "Launch tool is disabled or has the wrong kind",
+                ));
+            }
+        }
+    }
+    if folder.is_some() && project_id.is_none() {
+        return Err(AppError::new(
+            ErrorCode::ScopeDenied,
+            "A launch folder must be bound to a registered project",
+        ));
+    }
+    Ok(())
 }
 fn sanitize_operation(
     operation: Operation,

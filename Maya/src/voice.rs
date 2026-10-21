@@ -139,6 +139,10 @@ impl VoiceService {
             })
             .await?;
 
+        let provider_uuid = Uuid::parse_str(&provider_id).map_err(|_| {
+            AppError::new(ErrorCode::IntegrityFailure, "Stored provider ID is invalid")
+        })?;
+
         let (base_url, secret_ref) = self
             .db
             .read(move |conn| {
@@ -172,7 +176,7 @@ impl VoiceService {
                 "Provider credential is not configured",
             )
         })?;
-        let secret_id = Uuid::parse_str(&secret_ref).map_err(|_| {
+        let secret_id = secret_reference_id(&secret_ref, provider_uuid).ok_or_else(|| {
             AppError::new(
                 ErrorCode::ModelUnavailable,
                 format!("Invalid secret ID format in provider: {secret_ref}"),
@@ -378,7 +382,7 @@ impl VoiceService {
                 "Provider credential is not configured",
             )
         })?;
-        let secret_id = Uuid::parse_str(&secret_ref).map_err(|_| {
+        let secret_id = secret_reference_id(&secret_ref, provider_id).ok_or_else(|| {
             AppError::new(
                 ErrorCode::ModelUnavailable,
                 format!("Invalid secret ID format in provider: {secret_ref}"),
@@ -534,7 +538,7 @@ impl VoiceService {
             if is_stt && model_enabled != 0 && prov_enabled != 0 {
                 if let Some(sec_id) = secret_ref
                     .as_deref()
-                    .and_then(|value| Uuid::parse_str(value).ok())
+                    .and_then(|value| secret_reference_id(value, Uuid::nil()))
                 {
                     if self.secrets.get(sec_id).await.is_ok() {
                         stt_available = true;
@@ -549,7 +553,7 @@ impl VoiceService {
             if is_tts && model_enabled != 0 && prov_enabled != 0 {
                 if let Some(sec_id) = secret_ref
                     .as_deref()
-                    .and_then(|value| Uuid::parse_str(value).ok())
+                    .and_then(|value| secret_reference_id(value, Uuid::nil()))
                 {
                     if self.secrets.get(sec_id).await.is_ok() {
                         tts_available = true;
@@ -638,4 +642,13 @@ impl VoiceService {
 
         Ok(vec![browser_tts, cloud_stt, cloud_tts])
     }
+}
+
+fn secret_reference_id(reference: &str, fallback: Uuid) -> Option<Uuid> {
+    reference
+        .split_once(':')
+        .and_then(|(_, id)| Uuid::parse_str(id).ok())
+        .or_else(|| Uuid::parse_str(reference).ok())
+        .or_else(|| (reference == "session" || reference == "keyring").then_some(fallback))
+        .filter(|id| !id.is_nil())
 }

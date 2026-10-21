@@ -1,0 +1,25 @@
+sequenceDiagram
+  participant U as Owner
+  participant W as Workspace UI
+  participant M as Maya Rust Core
+  participant P as Policy Guard
+  participant C as Coding CLI
+  participant FS as Approved Project
+  U->>W: Discuss project and implement
+  W->>M: Create workflow request
+  M->>FS: Scoped read-only inspection
+  M->>W: Plan + provenance + proposed paths
+  U->>W: Approve plan revision and paths
+  W->>M: Signed-in local approval decision
+  M->>P: Validate hash, folder, actions, expiry
+  alt Approved
+    P-->>M: Allowed scope
+    M->>C: Run with restricted cwd/context
+    C->>FS: Attempt file modifications
+    FS-->>M: Actual diff/commit state
+    M->>FS: Run allowlisted verification
+    M-->>W: Status, diff, tests, report
+  else Rejected or expired
+    P-->>M: Deny
+    M-->>W: Blocked, no edits
+  end

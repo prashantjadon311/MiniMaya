@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "approval_id": "example-approval-id",
+  "job_id": "example-job-id",
+  "project_id": "example-project-id",
+  "plan_sha256": "example-immutable-sha256",
+  "allowed_relative_paths": ["src/", "tests/"],
+  "allowed_action_classes": ["project_file_edit", "nonprivileged_test"],
+  "expires_at_utc": "2026-10-20T15:00:00Z",
+  "decision": "approve",
+  "owner_acknowledged": true,
+  "example_only": true
+}

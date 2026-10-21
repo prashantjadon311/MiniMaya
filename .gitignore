@@ -1,0 +1,77 @@
+# Rust build artifacts
+target/
+**/target/
+**/*.rs.bk
+*.lock.d
+
+# Duplicate documentation archives
+MAYA_MINI_v0.1_COMPLETE_PRODUCT_DOCS.zip
+*.zip
+*.tar.gz
+*.tgz
+
+# Environment, secrets, API keys, credentials, and tokens
+.env
+.env.*
+*.env
+*.pem
+*.key
+*.cert
+*.crt
+id_rsa*
+*.token
+*.secret
+credentials.json
+
+# SQLite runtime databases and journals
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
+
+# Runtime logs, recordings, and audio caches
+logs/
+**/logs/
+*.log
+*.recording
+*.wav
+*.ogg
+*.webm
+*.mp3
+
+# Temporary files and caches
+tmp/
+**/tmp/
+temp/
+**/temp/
+*.tmp
+*.temp
+*.cache
+.cache/
+**/.cache/
+.DS_Store
+Thumbs.db
+
+# Local IDE configuration
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Backup directories
+backup/
+**/backup/
+backups/
+**/backups/
+
+# Release measurement/validation artifacts (preserve release documentation)
+Maya/release/validation.json
+Maya/release/measurements.csv
+Maya/release/acceptance.md
+!Maya/release/progress.md

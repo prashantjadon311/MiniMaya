@@ -1,0 +1,18 @@
+flowchart TD
+  A([Owner requests project work]) --> B{Registered project?}
+  B -- No --> B1[Request scoped path registration] --> B
+  B -- Yes --> C[Read-only project inspection]
+  C --> D[AI review and plan artifact]
+  D --> E[Show plan, paths, risks and tests]
+  E --> F{Explicit owner approval?}
+  F -- No --> G[Save plan, wait or cancel]
+  F -- Yes --> H[Verify plan hash, paths, expiry, action policy]
+  H --> I{Valid authorization?}
+  I -- No --> E
+  I -- Yes --> J[Save checkpoint and launch official coding CLI]
+  J --> K[Capture bounded events and edits]
+  K --> L[Inspect actual diff and run approved tests]
+  L --> M{Tests pass?}
+  M -- No --> N[Report failure and request next action]
+  M -- Yes --> O[Save artifact and final report]
+  O --> P([Update linked task])

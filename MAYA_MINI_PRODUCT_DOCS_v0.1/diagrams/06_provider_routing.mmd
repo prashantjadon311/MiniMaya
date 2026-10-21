@@ -1,0 +1,14 @@
+flowchart LR
+  Q[Request] --> R[Resolve role and model preference]
+  R --> A{Provider enabled and available?}
+  A -- Yes --> B{Supported API or official CLI?}
+  B -- Yes --> C[Execute supported integration]
+  B -- No --> D{Permitted browser interaction?}
+  D -- Yes --> E[Optional browser handoff]
+  D -- No --> F[Manual copy or export requested]
+  A -- No --> G{Explicit enabled fallback?}
+  G -- Yes --> R
+  G -- No --> H[Show actionable error]
+  C --> I[Store result with provenance]
+  E --> I
+  F --> I

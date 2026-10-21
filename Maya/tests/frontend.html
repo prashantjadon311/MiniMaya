@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Maya frontend harness</title></head>
+<body>
+  <h1>Maya frontend manual harness</h1>
+  <p>Serve the repository root locally only for development, open this file, and inspect the results below.</p>
+  <iframe id="maya" title="Maya workspace" src="../web/index.html" width="100%" height="720"></iframe>
+  <pre id="results">Waiting for workspace…</pre>
+  <script type="module">
+    const frame=document.querySelector('#maya');
+    frame.addEventListener('load',()=>{
+      const documentUnderTest=frame.contentDocument;
+      const tabs=[...documentUnderTest.querySelectorAll('[data-tab]')].map(node=>node.dataset.tab);
+      document.querySelector('#results').textContent=JSON.stringify({
+        exact_tabs:JSON.stringify(tabs)===JSON.stringify(['chat','tasks','activity','workspace']),
+        panels:[...documentUnderTest.querySelectorAll('[data-panel]')].length,
+        approval_dialog:Boolean(documentUnderTest.querySelector('#approval-dialog'))
+      },null,2);
+    });
+  </script>
+</body>
+</html>

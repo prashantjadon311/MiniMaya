@@ -1,0 +1,13 @@
+flowchart LR
+  Req[Approved Scope] --> Spec[Design + Acceptance]
+  Spec --> Review{Owner sign-off}
+  Review -- No --> Spec
+  Review -- Yes --> Plan[Milestone Work Plan]
+  Plan --> Implement[Small implementation increment]
+  Implement --> Tests[Unit/Integration/Security]
+  Tests --> Pass{All gates pass?}
+  Pass -- No --> Implement
+  Pass -- Yes --> Performance[RSS/CPU + End-to-end UAT]
+  Performance --> Release{Owner accepts?}
+  Release -- No --> Plan
+  Release -- Yes --> Ship[Package / Record Release]

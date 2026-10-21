@@ -1,0 +1,18 @@
+flowchart TD
+  A[Request in Chat or Tasks] --> B[Parse title, due time, priority]
+  B --> C{Time ambiguous?}
+  C -- Yes --> D[Ask owner to clarify timezone/date] --> B
+  C -- No --> E[Persist task and reminder]
+  E --> F[Schedule next wake-up event]
+  F --> G{Deadline or check-in due?}
+  G -- No --> F
+  G -- Yes --> H[Send permitted local notification]
+  H --> I[Ask progress and blocker]
+  I --> J{Owner answered?}
+  J -- No --> K[Mark check-in unanswered]
+  J -- Yes --> L[Store manual progress + evidence tag]
+  K --> M[Generate truthful daily/weekly report]
+  L --> M
+  M --> N{Task done?}
+  N -- No --> F
+  N -- Yes --> O([Archive/review])

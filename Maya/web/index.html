@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Maya Mini</title>
+  <link rel="stylesheet" href="/web/style.css">
+</head>
+<body>
+  <header><h1 id="assistant-name">Maya Mini</h1><p id="connection" role="status">Connecting…</p></header>
+  <nav aria-label="Main workspace">
+    <button type="button" data-tab="chat" aria-controls="chat">Chat</button>
+    <button type="button" data-tab="tasks" aria-controls="tasks">Tasks</button>
+    <button type="button" data-tab="activity" aria-controls="activity">Activity</button>
+    <button type="button" data-tab="workspace" aria-controls="workspace">Workspace</button>
+  </nav>
+  <main>
+    <section id="chat" data-panel tabindex="-1"><h2>Chat</h2></section>
+    <section id="tasks" data-panel hidden tabindex="-1"><h2>Tasks</h2></section>
+    <section id="activity" data-panel hidden tabindex="-1"><h2>Activity</h2></section>
+    <section id="workspace" data-panel hidden tabindex="-1"><h2>Workspace</h2></section>
+  </main>
+  <dialog id="approval-dialog"><form method="dialog"><h2>Approval</h2><div data-approval-body></div><button value="deny">Deny</button><button value="approve">Approve</button></form></dialog>
+  <div id="alerts" role="alert" aria-live="assertive"></div>
+  <script type="module" src="/web/js/app.js"></script>
+</body>
+</html>

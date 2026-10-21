@@ -1,0 +1,15 @@
+flowchart TD
+  U[Owner] --> UI[Existing Browser / Local Workspace]
+  UI -->|127.0.0.1| HTTP[Axum HTTP and SSE]
+  HTTP --> R[Rust Orchestrator]
+  R --> T[Task + Reminder Service]
+  R --> M[Models and CLI Adapters]
+  R --> W[Scoped Workspace Tools]
+  R --> X[Optional Browser / Voice]
+  R --> P[Policy and Approval Guard]
+  P -. authorizes .-> W
+  P -. authorizes .-> M
+  T --> DB[(SQLite)]
+  R --> DB
+  P --> DB
+  M --> EXT[External AI or Coding Agent]

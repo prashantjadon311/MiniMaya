@@ -1,0 +1,24 @@
+stateDiagram-v2
+  [*] --> Created
+  Created --> Inspecting
+  Inspecting --> Planned
+  Planned --> AwaitingApproval
+  AwaitingApproval --> Approved: owner approves immutable plan
+  AwaitingApproval --> Cancelled: deny/cancel
+  Approved --> Executing: policy recheck
+  Executing --> Verifying: tool exits / changed files recorded
+  Verifying --> Reporting
+  Reporting --> Completed
+  Inspecting --> Failed
+  Executing --> Failed
+  Verifying --> Failed
+  Executing --> Cancelling: cancellation requested
+  Cancelling --> Cancelled: child stopped and reconciled
+  Approved --> Paused: before next step
+  Paused --> Approved: resume approved step
+  Executing --> NeedsReconciliation: crash or uncertain side effect
+  NeedsReconciliation --> AwaitingApproval: replan/reapprove
+  NeedsReconciliation --> Verifying: safe state confirmed
+  Failed --> AwaitingApproval: revised plan / new authorization
+  Completed --> [*]
+  Cancelled --> [*]

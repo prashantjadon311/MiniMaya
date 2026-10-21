@@ -1,0 +1,14 @@
+flowchart TD
+  I[Requested action] --> C[Classify read / scoped-write / critical]
+  C --> P[Canonicalize and validate path/command]
+  P --> D{Denied or out of scope?}
+  D -- Yes --> X([Reject and audit])
+  D -- No --> A{Owner approval required?}
+  A -- No --> E[Execute safe read]
+  A -- Yes --> U[Show exact action, scope and expiry]
+  U --> V{Owner explicitly approves?}
+  V -- No --> X
+  V -- Yes --> W[Revalidate plan hash and scope at execution]
+  W --> Z{Still valid?}
+  Z -- No --> X
+  Z -- Yes --> K[Execute bounded action and audit]

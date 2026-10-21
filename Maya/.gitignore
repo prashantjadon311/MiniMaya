@@ -1,0 +1,17 @@
+/target/
+/release/validation.json
+/release/measurements.csv
+/release/acceptance.md
+.DS_Store
+*.lock.d
+*.tmp
+*.log
+*.recording
+*.wav
+*.ogg
+*.webm
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
+.env*
+!release/progress.md

@@ -1,0 +1,6 @@
+import{bootstrap,events}from'./api.js';import{showError}from'./dom.js';import*as chat from'./chat.js';import*as tasks from'./tasks.js';import*as activity from'./activity.js';import*as workspace from'./workspace.js';
+const modules={chat,tasks,activity,workspace};let cleanup=()=>{},streamController;
+export async function navigate(tab){cleanup();cleanup=()=>{};for(const panel of document.querySelectorAll('[data-panel]'))panel.hidden=panel.id!==tab;const panel=document.getElementById(tab);cleanup=await modules[tab].mount(panel,{navigate});panel.focus();location.hash=`tab=${tab}`;}
+export function setServiceState(snapshot){document.getElementById('connection').textContent=snapshot;}
+export async function start(){try{await bootstrap();setServiceState('Connected locally');document.querySelector('nav').addEventListener('click',event=>{const tab=event.target.dataset.tab;if(tab)navigate(tab)});await navigate(new URLSearchParams(location.hash.slice(1)).get('tab')||'chat');streamController=new AbortController();events('/events',()=>{},streamController.signal,state=>setServiceState(state==='connected'?'Connected locally':'Event stream disconnected; reconnecting…'));}catch(error){setServiceState('Disconnected');showError(document.getElementById('alerts'),error)}}
+addEventListener('beforeunload',()=>{cleanup();streamController?.abort()});start();

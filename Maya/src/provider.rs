@@ -296,6 +296,23 @@ impl ProviderRegistry {
             .unwrap_or(existing.local_endpoint_allowed);
         let new_enabled = patch.enabled.unwrap_or(existing.enabled);
         let new_timeout = patch.timeout_ms.unwrap_or(existing.timeout_ms);
+        validate_provider_input(&ProviderInput {
+            label: new_label.clone(),
+            kind: existing.kind,
+            protocol: existing.protocol.clone(),
+            endpoint: new_endpoint.clone(),
+            local_endpoint_allowed: new_local_allowed,
+            enabled: new_enabled,
+            billing_mode: existing.billing_mode,
+            timeout_ms: new_timeout,
+            owner_ack: true,
+        })?;
+        if !(10_000..=300_000).contains(&new_timeout) {
+            return Err(AppError::new(
+                ErrorCode::InvalidRequest,
+                "timeout_ms must be between 10000 and 300000",
+            ));
+        }
         let new_rev = existing.revision + 1;
         let now_ms = chrono::Utc::now().timestamp_millis();
         let id_str = id.to_string();
@@ -1377,12 +1394,18 @@ fn validate_provider_input(input: &ProviderInput) -> Result<()> {
             "Provider endpoint cannot contain credentials, query, or fragment",
         ));
     }
+    let loopback_host = endpoint.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    });
     if endpoint.scheme() != "https"
-        && !(endpoint.scheme() == "http" && input.local_endpoint_allowed)
+        && !(endpoint.scheme() == "http" && input.local_endpoint_allowed && loopback_host)
     {
         return Err(AppError::new(
             ErrorCode::ScopeDenied,
-            "Provider endpoint must use HTTPS unless a local HTTP endpoint is explicitly allowed",
+            "Provider endpoint must use HTTPS unless an HTTP loopback endpoint is explicitly allowed",
         ));
     }
     Ok(())

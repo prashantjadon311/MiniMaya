@@ -768,9 +768,16 @@ pub async fn message_send(
     Path(p): Path<IdPath>,
     Json(body): Json<UserMessage>,
 ) -> Result<ApiResponse<MessageReceipt>> {
-    Ok(ApiResponse::ok(
-        state.assistant.receive(p.id, body, &owner).await?,
-    ))
+    let receipt = state.assistant.receive(p.id, body, &owner).await?;
+    if let Some(job_id) = receipt.job_id {
+        let workflow = state.workflow.clone();
+        tokio::spawn(async move {
+            let _ = workflow.run_chat(job_id).await;
+        });
+        Ok(ApiResponse::accepted(receipt))
+    } else {
+        Ok(ApiResponse::ok(receipt))
+    }
 }
 
 pub async fn memory_search(

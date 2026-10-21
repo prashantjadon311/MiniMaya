@@ -2,6 +2,7 @@ use crate::approval::{ApprovalRequest, ApprovalService};
 use crate::artifacts::{ArtifactInput, ArtifactStore};
 use crate::auth::SessionContext;
 use crate::coding::CodingService;
+use crate::conversation::ConversationService;
 use crate::db::Db;
 use crate::error::{AppError, ErrorCode, Result};
 use crate::fileops::FileService;
@@ -19,6 +20,18 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChatJobPayload {
+    conversation_id: Id,
+    project_id: Option<Id>,
+    model_id: Id,
+    model_revision: Revision,
+    provider_id: Id,
+    provider_revision: Revision,
+    messages: Vec<ModelMessage>,
+}
+
 #[derive(Clone)]
 pub struct WorkflowEngine {
     db: Db,
@@ -29,6 +42,7 @@ pub struct WorkflowEngine {
     policy: Arc<Policy>,
     artifacts: Arc<ArtifactStore>,
     files: Arc<FileService>,
+    conversations: Arc<ConversationService>,
     transient: Arc<Mutex<std::collections::HashMap<Id, Zeroizing<Vec<u8>>>>>,
     active: Arc<Mutex<std::collections::HashMap<Id, CancellationToken>>>,
 }
@@ -44,6 +58,7 @@ impl WorkflowEngine {
         policy: Arc<Policy>,
         artifacts: Arc<ArtifactStore>,
         files: Arc<FileService>,
+        conversations: Arc<ConversationService>,
     ) -> Self {
         Self {
             db,
@@ -54,6 +69,7 @@ impl WorkflowEngine {
             policy,
             artifacts,
             files,
+            conversations,
             transient: Arc::new(Mutex::new(std::collections::HashMap::new())),
             active: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
@@ -69,6 +85,200 @@ impl WorkflowEngine {
 
     pub async fn take_transient(&self, job_id: Id) -> Option<Zeroizing<Vec<u8>>> {
         self.transient.lock().await.remove(&job_id)
+    }
+
+    pub async fn create_chat_job(
+        &self,
+        conversation_id: Id,
+        text: &str,
+        messages: Vec<ModelMessage>,
+        resolved: ResolvedModel,
+        actor: Actor,
+    ) -> Result<Job> {
+        let payload = ChatJobPayload {
+            conversation_id,
+            project_id: self.conversations.get(conversation_id).await?.project_id,
+            model_id: resolved.model.id,
+            model_revision: resolved.model.revision,
+            provider_id: resolved.provider.id,
+            provider_revision: resolved.provider.revision,
+            messages,
+        };
+        let project_id = payload.project_id;
+        let input_json = serde_json::to_string(&payload).map_err(|error| {
+            AppError::new(ErrorCode::InvalidRequest, "Chat job could not be encoded")
+                .with_source(error)
+        })?;
+        let id = Uuid::new_v4();
+        let now = chrono::Utc::now().timestamp_millis();
+        let goal: String = text.trim().chars().take(8192).collect();
+        let actor_json = serde_json::to_string(&actor)
+            .map_err(|error| AppError::new(ErrorCode::Internal, error.to_string()))?;
+        self.db
+            .write(move |tx| {
+                tx.execute(
+                    r#"INSERT INTO jobs
+                       (id,kind,task_id,project_id,conversation_id,goal,state,revision,plan_id,
+                        checkpoint_id,verification,paused_from,error_code,input_json,
+                        cancellation_requested,pause_requested,continuation,approval_purpose,
+                        created_at,updated_at)
+                       VALUES (?1,'chat',NULL,?2,?3,?4,'created',1,NULL,NULL,'not_applicable',
+                               NULL,NULL,?5,0,0,NULL,NULL,?6,?6)"#,
+                    params![
+                        id.to_string(),
+                        project_id.map(|value| value.to_string()),
+                        conversation_id.to_string(),
+                        goal,
+                        input_json,
+                        now
+                    ],
+                )
+                .map_err(db_error)?;
+                tx.execute(
+                    r#"INSERT INTO audit_events
+                       (job_id,actor_json,action,resource_kind,resource_id,decision,metadata_json,at)
+                       VALUES (?1,?2,'chat.create','job',?1,'accepted','{}',?3)"#,
+                    params![id.to_string(), actor_json, now],
+                )
+                .map_err(db_error)?;
+                tx.query_row(
+                    "SELECT * FROM jobs WHERE id=?1",
+                    params![id.to_string()],
+                    parse_job,
+                )
+                .map_err(db_error)
+            })
+            .await
+    }
+
+    pub async fn run_chat(self: Arc<Self>, id: Id) -> Result<()> {
+        let cancel = CancellationToken::new();
+        {
+            let mut active = self.active.lock().await;
+            if active.contains_key(&id) {
+                return Err(AppError::new(ErrorCode::Busy, "Job is already running"));
+            }
+            active.insert(id, cancel.clone());
+        }
+        let result = self.run_chat_inner(id, cancel).await;
+        self.active.lock().await.remove(&id);
+        if let Err(error) = &result {
+            self.record_run_failure(id, error).await?;
+        }
+        result
+    }
+
+    async fn run_chat_inner(&self, id: Id, cancel: CancellationToken) -> Result<()> {
+        let job = self.get(id).await?;
+        if job.kind != JobKind::Chat || job.state != JobState::Created {
+            return Err(AppError::new(
+                ErrorCode::Conflict,
+                "Chat job is not ready to start",
+            ));
+        }
+        self.set_state(id, job.revision, JobState::Executing)
+            .await?;
+        let generate_step = self.begin_step(id, "generate", true).await?;
+        let payload = self.load_chat_payload(id).await?;
+        let resolved = self
+            .providers
+            .resolve(ModelSelection {
+                role: Role::Chat,
+                override_id: Some(payload.model_id),
+                project_id: payload.project_id,
+                fallback_consent: false,
+            })
+            .await?;
+        if resolved.model.id != payload.model_id
+            || resolved.model.revision != payload.model_revision
+            || resolved.provider.id != payload.provider_id
+            || resolved.provider.revision != payload.provider_revision
+        {
+            return Err(AppError::new(
+                ErrorCode::ModelUnavailable,
+                "Chat model or provider changed before execution",
+            ));
+        }
+        let result = self
+            .providers
+            .generate(
+                ModelRequest {
+                    request_id: Uuid::new_v4(),
+                    model: resolved.model.clone(),
+                    role: Role::Chat,
+                    messages: payload.messages,
+                    max_output_bytes: 32 * 1024,
+                    timeout_ms: resolved.provider.timeout_ms,
+                    output: ModelOutputMode::Text,
+                },
+                cancel,
+            )
+            .await?;
+        self.finish_step(generate_step, StepState::Succeeded, None, None)
+            .await?;
+        let record_step = self.begin_step(id, "record_response", true).await?;
+        self.conversations
+            .append_assistant_message(
+                payload.conversation_id,
+                result.text,
+                Some(resolved.model.id),
+                Some(id),
+            )
+            .await?;
+        self.finish_step(record_step, StepState::Succeeded, None, None)
+            .await?;
+        let current = self.get(id).await?;
+        self.set_execution_state(
+            id,
+            current.revision,
+            JobState::Completed,
+            None,
+            Verification::NotApplicable,
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn load_chat_payload(&self, id: Id) -> Result<ChatJobPayload> {
+        self.db
+            .read(move |conn| {
+                let input: String = conn
+                    .query_row(
+                        "SELECT input_json FROM jobs WHERE id=?1 AND kind='chat'",
+                        params![id.to_string()],
+                        |row| row.get(0),
+                    )
+                    .map_err(db_error)?;
+                serde_json::from_str(&input).map_err(|error| {
+                    AppError::new(ErrorCode::IntegrityFailure, "Stored chat job is invalid")
+                        .with_source(error)
+                })
+            })
+            .await
+    }
+
+    pub async fn resume_safe_chat_jobs(self: &Arc<Self>) -> Result<usize> {
+        let ids = self
+            .db
+            .read(|conn| {
+                let mut statement = conn
+                    .prepare("SELECT id FROM jobs WHERE kind='chat' AND state='created'")
+                    .map_err(db_error)?;
+                statement
+                    .query_map([], |row| row.get::<_, String>(0))
+                    .map_err(db_error)?
+                    .map(|value| value.and_then(parse_id))
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(db_error)
+            })
+            .await?;
+        for id in ids.iter().copied() {
+            let workflow = self.clone();
+            tokio::spawn(async move {
+                let _ = workflow.run_chat(id).await;
+            });
+        }
+        Ok(ids.len())
     }
 
     pub async fn create(&self, input: JobInput, actor: Actor) -> Result<Job> {

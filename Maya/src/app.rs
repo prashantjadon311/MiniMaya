@@ -159,11 +159,6 @@ impl App {
             desktop.clone(),
         ));
         let conversations = Arc::new(ConversationService::new(db.clone()));
-        let assistant = Arc::new(AssistantService::new(
-            conversations.clone(),
-            tasks.clone(),
-            providers.clone(),
-        ));
         let memory = Arc::new(MemoryService::new(db.clone(), artifacts.clone()));
         let reports = Arc::new(ReportService::new(db.clone()));
         let files = Arc::new(FileService::new(db.clone(), process.clone()));
@@ -176,6 +171,13 @@ impl App {
             policy.clone(),
             artifacts.clone(),
             files.clone(),
+            conversations.clone(),
+        ));
+        let assistant = Arc::new(AssistantService::new(
+            conversations.clone(),
+            tasks.clone(),
+            providers.clone(),
+            workflow.clone(),
         ));
         let browser = Arc::new(BrowserService::new(db.clone(), artifacts.clone()));
         let voice = Arc::new(VoiceService::new(
@@ -216,6 +218,7 @@ impl App {
             schedule_wake: scheduler_wake.clone(),
         }));
         state.workflow.recover().await?;
+        state.workflow.resume_safe_chat_jobs().await?;
         Ok(Self {
             state,
             listener,

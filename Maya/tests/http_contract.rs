@@ -6,8 +6,9 @@ use maya_mini::config::RuntimeConfig;
 use maya_mini::http;
 use maya_mini::protocol::{JobInput, JobMode};
 use maya_mini::types::{
-    ActionClass, Actor, ActorKind, ApprovalDecisionKind, ExportFormat, ExportSelection, JobKind,
-    JobState, Operation, ProjectInput,
+    ActionClass, Actor, ActorKind, ApprovalDecisionKind, BillingMode, ExportFormat,
+    ExportSelection, JobKind, JobState, ListQuery, ModelCapability, ModelInput, Operation,
+    ProjectInput, ProviderInput, ProviderKind, Role, RolesPut,
 };
 use serde_json::Value;
 use std::path::Path;
@@ -636,4 +637,128 @@ async fn test_x41_workspace_task_payloads_roundtrip_through_real_handlers() {
         )
         .await;
     assert_eq!(status, 200, "{report}");
+}
+
+#[tokio::test]
+async fn feature_a02_external_chat_returns_persisted_job_before_provider_finishes() {
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("mock provider listener");
+    let provider_port = listener.local_addr().unwrap().port();
+    let provider_app = axum::Router::new().route(
+        "/chat/completions",
+        axum::routing::post(|| async {
+            tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+            (
+                [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                concat!(
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"async reply\"}}],\"model\":\"mock-chat\"}\n\n",
+                    "data: {\"choices\":[{\"finish_reason\":\"stop\"}],\"model\":\"mock-chat\"}\n\n",
+                    "data: [DONE]\n\n"
+                ),
+            )
+        }),
+    );
+    let provider_task = tokio::spawn(async move {
+        axum::serve(listener, provider_app).await.unwrap();
+    });
+
+    let (_dir, app) = app().await;
+    let provider = app
+        .state
+        .providers
+        .create_provider(ProviderInput {
+            label: "Async chat fixture".to_string(),
+            kind: ProviderKind::OpenaiCompatibleChat,
+            protocol: "chat_completions".to_string(),
+            endpoint: format!("http://127.0.0.1:{provider_port}"),
+            local_endpoint_allowed: true,
+            enabled: true,
+            billing_mode: BillingMode::Api,
+            timeout_ms: 10_000,
+            owner_ack: true,
+        })
+        .await
+        .unwrap();
+    let model = app
+        .state
+        .providers
+        .create_model(ModelInput {
+            provider_id: provider.id,
+            model_id: "mock-chat".to_string(),
+            label: "Mock chat".to_string(),
+            enabled: true,
+            capabilities: vec![ModelCapability::Text],
+            context_limit_bytes: 32_768,
+        })
+        .await
+        .unwrap();
+    let roles = app.state.providers.get_roles().await.unwrap();
+    let mut bindings = roles.bindings;
+    let chat = bindings
+        .iter_mut()
+        .find(|binding| binding.role == Role::Chat)
+        .unwrap();
+    chat.model_id = Some(model.id);
+    app.state
+        .providers
+        .put_roles(RolesPut {
+            revision: roles.revision,
+            bindings,
+        })
+        .await
+        .unwrap();
+
+    let auth = authenticated(&app).await;
+    let (status, conversation) = auth
+        .request("POST", "/conversations", Some(serde_json::json!({})), None)
+        .await;
+    assert_eq!(status, 201, "{conversation}");
+    let conversation_id = conversation["data"]["id"].as_str().unwrap();
+    let started = std::time::Instant::now();
+    let (status, receipt) = auth
+        .request(
+            "POST",
+            &format!("/conversations/{conversation_id}/messages"),
+            Some(serde_json::json!({"text":"What is the status?"})),
+            None,
+        )
+        .await;
+    assert_eq!(status, 202, "{receipt}");
+    assert!(started.elapsed() < std::time::Duration::from_millis(500));
+    assert!(receipt["data"]["assistant_message"].is_null());
+    let job_id = uuid::Uuid::parse_str(receipt["data"]["job_id"].as_str().unwrap()).unwrap();
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        let job = app.state.workflow.get(job_id).await.unwrap();
+        if job.state == JobState::Completed {
+            break;
+        }
+        assert_ne!(job.state, JobState::Failed, "chat job failed: {job:?}");
+        assert!(tokio::time::Instant::now() < deadline, "chat job timed out");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let detail = app.state.workflow.detail(job_id).await.unwrap();
+    assert_eq!(detail.steps.len(), 2);
+    assert_eq!(detail.steps[0].kind, "generate");
+    assert_eq!(detail.steps[1].kind, "record_response");
+    let messages = app
+        .state
+        .conversations
+        .list_messages(
+            uuid::Uuid::parse_str(conversation_id).unwrap(),
+            ListQuery::default(),
+        )
+        .await
+        .unwrap();
+    let response = messages
+        .items
+        .iter()
+        .find(|message| message.job_id == Some(job_id))
+        .expect("job-linked assistant response");
+    assert_eq!(response.text, "async reply");
+    assert_eq!(response.model_id, Some(model.id));
+
+    provider_task.abort();
 }

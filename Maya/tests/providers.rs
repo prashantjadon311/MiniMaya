@@ -16,7 +16,7 @@ use maya_mini::types::{
     EditManifestChange, EditManifestOperation, ModelCapability, ModelInput, ModelMessage,
     ModelMessageRole, ModelOutputMode, ModelRequest, ModelResult, ModelResultFinish,
     ModelSelection, Plan, ProviderCapabilities, ProviderEvent, ProviderInput, ProviderKind,
-    ResolvedModelSource, Role, RolesPut, StagedProject, UsageObservation,
+    ProviderPatch, ResolvedModelSource, Role, RolesPut, StagedProject, UsageObservation,
 };
 use std::fs;
 use std::sync::Arc;
@@ -150,6 +150,21 @@ async fn test_x21_registry_roles_overrides_fallbacks_chains() {
         .await
         .unwrap_err();
     assert_eq!(wrong_protocol.code(), ErrorCode::InvalidRequest);
+    let non_loopback_http = registry
+        .create_provider(ProviderInput {
+            label: "Not local".to_string(),
+            kind: ProviderKind::OpenaiCompatibleChat,
+            protocol: "chat_completions".to_string(),
+            endpoint: "http://example.com/v1".to_string(),
+            local_endpoint_allowed: true,
+            enabled: true,
+            billing_mode: BillingMode::Api,
+            timeout_ms: 30000,
+            owner_ack: true,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(non_loopback_http.code(), ErrorCode::ScopeDenied);
 
     // 1. Create provider
     let p_in = ProviderInput {
@@ -164,6 +179,21 @@ async fn test_x21_registry_roles_overrides_fallbacks_chains() {
         owner_ack: true,
     };
     let prov = registry.create_provider(p_in).await.unwrap();
+    let insecure_patch = registry
+        .patch_provider(
+            prov.id,
+            ProviderPatch {
+                revision: prov.revision,
+                label: None,
+                endpoint: Some("http://example.com/v1".to_string()),
+                local_endpoint_allowed: Some(false),
+                enabled: None,
+                timeout_ms: None,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(insecure_patch.code(), ErrorCode::ScopeDenied);
 
     // 2. Create models: primary model A, and fallback model B
     let m_a = registry

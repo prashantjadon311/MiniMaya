@@ -4,15 +4,16 @@ use crate::error::{AppError, ErrorCode, Result};
 use crate::provider::ProviderRegistry;
 use crate::tasks::TaskService;
 use crate::types::*;
+use crate::workflow::WorkflowEngine;
 use chrono_tz::Tz;
 use std::sync::Arc;
-use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
 pub struct AssistantService {
     conversations: Arc<ConversationService>,
     tasks: Arc<TaskService>,
     providers: Arc<ProviderRegistry>,
+    workflow: Arc<WorkflowEngine>,
 }
 
 impl AssistantService {
@@ -20,11 +21,13 @@ impl AssistantService {
         conversations: Arc<ConversationService>,
         tasks: Arc<TaskService>,
         providers: Arc<ProviderRegistry>,
+        workflow: Arc<WorkflowEngine>,
     ) -> Self {
         Self {
             conversations,
             tasks,
             providers,
+            workflow,
         }
     }
 
@@ -99,31 +102,16 @@ impl AssistantService {
             Err(error) => return Err(error),
         };
         let context = self.conversations.context(id).await?;
-        let result = self
-            .providers
-            .generate(
-                ModelRequest {
-                    request_id: uuid::Uuid::new_v4(),
-                    model: resolved.model.clone(),
-                    role: Role::Chat,
-                    messages: context,
-                    max_output_bytes: 32 * 1024,
-                    timeout_ms: resolved.provider.timeout_ms,
-                    output: ModelOutputMode::Text,
-                },
-                CancellationToken::new(),
-            )
-            .await?;
-        let response = self
-            .conversations
-            .append_assistant_message(id, result.text, Some(resolved.model.id), None)
+        let job = self
+            .workflow
+            .create_chat_job(id, &input.text, context, resolved, actor)
             .await?;
         Ok(MessageReceipt {
             message: owner_message,
-            assistant_message: Some(response),
+            assistant_message: None,
             draft: None,
             task: None,
-            job_id: None,
+            job_id: Some(job.id),
         })
     }
 

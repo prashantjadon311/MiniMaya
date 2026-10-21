@@ -29,7 +29,13 @@ export async function mount(container){
             card.append(actionButton(card,`Review ${approval.action}`,async()=>{const choice=await confirmApproval(approval);await decide(approval,choice);await reload()}));
           }
           for(const action of detail.allowed_actions){
-            card.append(actionButton(card,action.replaceAll('_',' '),async()=>{await request('POST',`/jobs/${job.id}/actions`,{revision:detail.job.revision,action,step_id:null,reconciliation:action==='reconcile'?'inspect':null,checkpoint_id:null});await reload()}));
+            let recovery;
+            if(action==='reconcile'){
+              recovery=el('select',{'aria-label':'Reconciliation action'});
+              for(const value of ['inspect','continue_verification','replan','restore'])recovery.append(el('option',{value},value.replaceAll('_',' ')));
+              card.append(recovery);
+            }
+            card.append(actionButton(card,action.replaceAll('_',' '),async()=>{await request('POST',`/jobs/${job.id}/actions`,{revision:detail.job.revision,action,step_id:null,reconciliation:recovery?.value??null,checkpoint_id:null});await reload()}));
           }
         });
         card.append(details);list.append(card);

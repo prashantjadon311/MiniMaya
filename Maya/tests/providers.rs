@@ -94,7 +94,7 @@ fn helper_plan() -> Plan {
         goal: "Refactor core module".to_string(),
         summary: "Summary".to_string(),
         steps: vec![],
-        allowed_paths: vec!["src/**".to_string()],
+        allowed_paths: vec!["src/**".to_string(), "deprecated.txt".to_string()],
         actions: vec![ActionClass::ProjectEdit],
         command_ids: vec![],
         context_artifact_ids: vec![],
@@ -120,6 +120,37 @@ async fn test_x21_registry_roles_overrides_fallbacks_chains() {
 
     let registry = ProviderRegistry::new(db.clone(), secrets.clone(), mock_factory_success);
 
+    let unacknowledged = registry
+        .create_provider(ProviderInput {
+            label: "Unacknowledged".to_string(),
+            kind: ProviderKind::OpenaiResponses,
+            protocol: "responses".to_string(),
+            endpoint: "https://api.openai.com/v1".to_string(),
+            local_endpoint_allowed: false,
+            enabled: true,
+            billing_mode: BillingMode::Api,
+            timeout_ms: 30000,
+            owner_ack: false,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(unacknowledged.code(), ErrorCode::ActionDenied);
+    let wrong_protocol = registry
+        .create_provider(ProviderInput {
+            label: "Wrong protocol".to_string(),
+            kind: ProviderKind::OpenaiResponses,
+            protocol: "chat_completions".to_string(),
+            endpoint: "https://api.openai.com/v1".to_string(),
+            local_endpoint_allowed: false,
+            enabled: true,
+            billing_mode: BillingMode::Api,
+            timeout_ms: 30000,
+            owner_ack: true,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(wrong_protocol.code(), ErrorCode::InvalidRequest);
+
     // 1. Create provider
     let p_in = ProviderInput {
         label: "OpenAI Main".to_string(),
@@ -130,6 +161,7 @@ async fn test_x21_registry_roles_overrides_fallbacks_chains() {
         enabled: true,
         billing_mode: BillingMode::Api,
         timeout_ms: 30000,
+        owner_ack: true,
     };
     let prov = registry.create_provider(p_in).await.unwrap();
 
@@ -340,6 +372,7 @@ async fn test_x22_timeout_retry_rate_limit_usage_tracking() {
             enabled: true,
             billing_mode: BillingMode::Api,
             timeout_ms: 30000,
+            owner_ack: true,
         })
         .await
         .unwrap();
@@ -542,13 +575,16 @@ fn test_x23_all_five_wire_protocols() {
 #[test]
 fn test_x30_api_edit_manifest_validation_and_staging() {
     let stage_dir = tempfile::tempdir().unwrap();
+    let plan = helper_plan();
     let stage = StagedProject {
         path: stage_dir.path().to_path_buf(),
         checkpoint_id: Uuid::new_v4(),
-        baseline_digest: Digest::of(b"init"),
+        baseline_digest: plan.baseline_digest,
     };
 
-    let plan = helper_plan();
+    fs::create_dir_all(stage.path.join("src")).unwrap();
+    fs::write(stage.path.join("src/existing.rs"), b"fn old_func() {}").unwrap();
+    fs::write(stage.path.join("deprecated.txt"), b"old content").unwrap();
 
     // 1. Valid manifest
     let manifest = EditManifest {
@@ -564,13 +600,13 @@ fn test_x30_api_edit_manifest_validation_and_staging() {
             EditManifestChange {
                 path: "src/existing.rs".to_string(),
                 operation: EditManifestOperation::Replace,
-                expected_before_sha256: None,
+                expected_before_sha256: Some(Digest::of(b"fn old_func() {}")),
                 content_utf8: Some("fn updated_func() {}".to_string()),
             },
             EditManifestChange {
                 path: "deprecated.txt".to_string(),
                 operation: EditManifestOperation::Delete,
-                expected_before_sha256: None,
+                expected_before_sha256: Some(Digest::of(b"old content")),
                 content_utf8: None,
             },
         ],
@@ -578,9 +614,7 @@ fn test_x30_api_edit_manifest_validation_and_staging() {
 
     let cs = validate_manifest(&manifest, &plan).unwrap();
     assert_eq!(cs.changes.len(), 3);
-
-    // Initialise existing files in stage
-    fs::write(stage.path.join("deprecated.txt"), b"old content").unwrap();
+    assert_eq!(cs.baseline_digest, plan.baseline_digest);
 
     apply_manifest_to_stage(&stage, &manifest).unwrap();
 
@@ -602,13 +636,13 @@ fn test_x30_api_edit_manifest_validation_and_staging() {
         summary: "Duplicate path".to_string(),
         changes: vec![
             EditManifestChange {
-                path: "dup.txt".to_string(),
+                path: "src/dup.txt".to_string(),
                 operation: EditManifestOperation::Create,
                 expected_before_sha256: None,
                 content_utf8: Some("1".to_string()),
             },
             EditManifestChange {
-                path: "dup.txt".to_string(),
+                path: "src/dup.txt".to_string(),
                 operation: EditManifestOperation::Create,
                 expected_before_sha256: None,
                 content_utf8: Some("2".to_string()),
@@ -648,6 +682,51 @@ fn test_x30_api_edit_manifest_validation_and_staging() {
     let err_abs = validate_manifest(&abs_manifest, &plan);
     assert!(err_abs.is_err());
     assert_eq!(err_abs.unwrap_err().code, ErrorCode::ScopeDenied);
+
+    // 5. A normalized but unapproved path is rejected by the immutable plan.
+    let outside = EditManifest {
+        schema_version: 1,
+        summary: "Outside plan".to_string(),
+        changes: vec![EditManifestChange {
+            path: "README.md".to_string(),
+            operation: EditManifestOperation::Create,
+            expected_before_sha256: None,
+            content_utf8: Some("unexpected".to_string()),
+        }],
+    };
+    let err_outside = validate_manifest(&outside, &plan).unwrap_err();
+    assert_eq!(err_outside.code(), ErrorCode::ScopeDenied);
+
+    // 6. Replace/delete operations must bind the exact staged preimage.
+    let missing_preimage = EditManifest {
+        schema_version: 1,
+        summary: "Unbound replace".to_string(),
+        changes: vec![EditManifestChange {
+            path: "src/existing.rs".to_string(),
+            operation: EditManifestOperation::Replace,
+            expected_before_sha256: None,
+            content_utf8: Some("changed".to_string()),
+        }],
+    };
+    assert_eq!(
+        validate_manifest(&missing_preimage, &plan)
+            .unwrap_err()
+            .code(),
+        ErrorCode::InvalidPlan
+    );
+
+    let mismatched = EditManifest {
+        schema_version: 1,
+        summary: "Stale replace".to_string(),
+        changes: vec![EditManifestChange {
+            path: "src/existing.rs".to_string(),
+            operation: EditManifestOperation::Replace,
+            expected_before_sha256: Some(Digest::of(b"stale bytes")),
+            content_utf8: Some("changed".to_string()),
+        }],
+    };
+    let mismatch_error = apply_manifest_to_stage(&stage, &mismatched).unwrap_err();
+    assert_eq!(mismatch_error.code(), ErrorCode::PlanChanged);
 }
 
 // =========================================================================

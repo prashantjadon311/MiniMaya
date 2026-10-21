@@ -1,0 +1,15 @@
+[Unit]
+Description=Maya Mini local assistant
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/maya-mini --headless --port 0 --data-dir=%S/maya-mini --cache-dir=%C/maya-mini --runtime-dir=%t/maya-mini
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
+
+[Install]
+WantedBy=default.target

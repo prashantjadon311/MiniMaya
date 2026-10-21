@@ -539,6 +539,7 @@ pub struct ValidatedEndpoint {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProviderInput {
     pub label: String,
     pub kind: ProviderKind,
@@ -548,6 +549,7 @@ pub struct ProviderInput {
     pub enabled: bool,
     pub billing_mode: BillingMode,
     pub timeout_ms: u32,
+    pub owner_ack: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

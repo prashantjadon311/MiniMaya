@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Maya Mini
+Comment=Local personal assistant and supervised coding workspace
+Exec=maya-mini --open
+Terminal=false
+Categories=Utility;Development;
+StartupNotify=true
+Keywords=assistant;tasks;coding;

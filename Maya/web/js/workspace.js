@@ -11,7 +11,7 @@ function submit(form,label,handler){const result=el('p',{class:'muted'}),button=
 
 function identityCard(settings){
   const card=formCard('Assistant identity'),form=el('form');
-  const name=field('Name',settings.identity.name),greeting=field('Greeting',settings.identity.greeting),language=select('Language',settings.identity.language,['english','hindi','bengali','spanish','french','german','japanese','other']),tone=select('Tone',settings.identity.tone,['concise','friendly','formal']);
+  const name=field('Name',settings.identity.name),greeting=field('Greeting',settings.identity.greeting),language=select('Language',settings.identity.language,['english','hindi','hinglish']),tone=select('Tone',settings.identity.tone,['concise','standard','detailed']);
   form.append(name.row,greeting.row,language.row,tone.row);
   submit(form,'Save identity',async()=>{const updated=await save('identity',{name:name.input.value.trim(),greeting:greeting.input.value.trim(),language:language.node.value,tone:tone.node.value});document.getElementById('assistant-name').textContent=updated.identity.name});
   card.append(form);return card;
@@ -27,9 +27,10 @@ function providersCard(providers,models){
   providerForm.append(label.row,kind.row,endpoint.row);
   submit(providerForm,'Add provider',()=>request('POST','/providers',{label:label.input.value.trim(),kind:kind.node.value,protocol:providerProtocol(kind.node.value),endpoint:endpoint.input.value.trim(),local_endpoint_allowed:false,enabled:true,billing_mode:'api',timeout_ms:120000,owner_ack:true}));
   card.append(providerForm);
-  const modelForm=el('form'),modelProvider=select('Provider',providers.items[0]?.id||'',providers.items.map(item=>({value:item.id,label:item.label}))),modelId=field('API model ID',''),modelLabel=field('Model label','');
-  modelForm.append(modelProvider.row,modelId.row,modelLabel.row);
-  submit(modelForm,'Add model',()=>request('POST','/models',{provider_id:modelProvider.node.value,model_id:modelId.input.value.trim(),label:modelLabel.input.value.trim(),enabled:true,capabilities:['text'],context_limit_bytes:1048576}));
+  const modelForm=el('form'),modelProvider=select('Provider',providers.items[0]?.id||'',providers.items.map(item=>({value:item.id,label:item.label}))),modelId=field('API model ID',''),modelLabel=field('Model label',''),contextLimit=field('Context limit bytes',32768,'number');
+  contextLimit.input.min='1024';contextLimit.input.max='131072';contextLimit.input.step='1024';
+  modelForm.append(modelProvider.row,modelId.row,modelLabel.row,contextLimit.row);
+  submit(modelForm,'Add model',()=>request('POST','/models',{provider_id:modelProvider.node.value,model_id:modelId.input.value.trim(),label:modelLabel.input.value.trim(),enabled:true,capabilities:['text'],context_limit_bytes:Number(contextLimit.input.value)}));
   card.append(modelForm);return card;
 }
 

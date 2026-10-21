@@ -35,6 +35,89 @@ async fn app() -> (TempDir, App) {
     (dir, app)
 }
 
+struct AuthHarness {
+    router: axum::Router,
+    host: String,
+    origin: String,
+    bearer: String,
+    csrf: String,
+}
+
+impl AuthHarness {
+    async fn request(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+        approval_id: Option<&str>,
+    ) -> (axum::http::StatusCode, Value) {
+        let mut builder = axum::http::Request::builder()
+            .method(method)
+            .uri(format!("/api/v1{path}"))
+            .header("host", &self.host)
+            .header("authorization", format!("Bearer {}", self.bearer));
+        if !matches!(method, "GET" | "HEAD") {
+            builder = builder
+                .header("origin", &self.origin)
+                .header("x-csrf-token", &self.csrf)
+                .header("idempotency-key", uuid::Uuid::new_v4().to_string())
+                .header("content-type", "application/json");
+        }
+        if let Some(id) = approval_id {
+            builder = builder.header("x-maya-approval-id", id);
+        }
+        let response = self
+            .router
+            .clone()
+            .oneshot(
+                builder
+                    .body(body.map_or_else(Body::empty, |value| Body::from(value.to_string())))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, value)
+    }
+}
+
+async fn authenticated(app: &App) -> AuthHarness {
+    let port = app.state.auth.port();
+    let host = format!("127.0.0.1:{port}");
+    let origin = format!("http://{host}");
+    let router = http::router(app.state.clone());
+    let launch = app.state.auth.issue_launch_link(port).await.unwrap();
+    let bootstrap = launch.url.expose_str().split("#bootstrap=").nth(1).unwrap();
+    let response = router
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/v1/session")
+                .header("host", &host)
+                .header("origin", &origin)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"bootstrap_token":bootstrap}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let value: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    AuthHarness {
+        router,
+        host,
+        origin,
+        bearer: value["data"]["session_token"].as_str().unwrap().to_string(),
+        csrf: value["data"]["csrf_token"].as_str().unwrap().to_string(),
+    }
+}
+
 #[tokio::test]
 async fn test_x11_x15_health_bootstrap_auth_origin_and_envelopes() {
     let (_dir, app) = app().await;
@@ -391,4 +474,166 @@ async fn test_x33_export_is_bound_to_a_persisted_owner_approval() {
     assert_eq!(approval.action, ActionClass::ExportData);
     assert_eq!(approval.scope.action_classes, vec![ActionClass::ExportData]);
     assert!(approval.scope.operation_digest.is_some());
+}
+
+#[tokio::test]
+async fn test_x33_export_endpoint_rejects_mismatch_then_consumes_exact_approval() {
+    let (_dir, app) = app().await;
+    let auth = authenticated(&app).await;
+    let selection = serde_json::json!({
+        "format":"json","settings":true,"tasks":[],"memory":[],"reports":[],
+        "include_project_paths":false,"all_tasks":false
+    });
+    let (status, receipt) = auth
+        .request(
+            "POST",
+            "/actions",
+            Some(serde_json::json!({"kind":"export","selection":selection})),
+            None,
+        )
+        .await;
+    assert_eq!(status, 201, "{receipt}");
+    let approval = &receipt["data"]["approval"];
+    let approval_id = approval["id"].as_str().unwrap();
+    let (status, decision) = auth
+        .request(
+            "POST",
+            &format!("/approvals/{approval_id}/decision"),
+            Some(serde_json::json!({
+                "revision":approval["revision"],
+                "request_digest":approval["request_digest"],
+                "decision":"approve","owner_ack":true
+            })),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{decision}");
+
+    let mut mismatch = selection.clone();
+    mismatch["include_project_paths"] = Value::Bool(true);
+    let (status, mismatch_body) = auth
+        .request("POST", "/memory/export", Some(mismatch), Some(approval_id))
+        .await;
+    assert_eq!(status, 403, "{mismatch_body}");
+
+    let (status, exported) = auth
+        .request("POST", "/memory/export", Some(selection), Some(approval_id))
+        .await;
+    assert_eq!(status, 201, "{exported}");
+    assert_eq!(exported["data"]["kind"], "export");
+    assert_eq!(exported["data"]["mime"], "application/json");
+}
+
+#[tokio::test]
+async fn test_x41_workspace_task_payloads_roundtrip_through_real_handlers() {
+    let (_dir, app) = app().await;
+    let auth = authenticated(&app).await;
+    let due_at = 1_798_070_400_000_i64;
+    let (status, created) = auth
+        .request(
+            "POST",
+            "/tasks",
+            Some(serde_json::json!({
+                "title":"Frontend contract task","description":"","project_id":null,
+                "parent_task_id":null,"priority":"normal","due_at":due_at,
+                "timezone":"Asia/Kolkata","estimated_minutes":null,"reminder":null
+            })),
+            None,
+        )
+        .await;
+    assert_eq!(status, 201, "{created}");
+    assert_eq!(created["data"]["due_at"], due_at);
+    let task_id = created["data"]["id"].as_str().unwrap();
+    let (status, patched) = auth
+        .request(
+            "PATCH",
+            &format!("/tasks/{task_id}"),
+            Some(serde_json::json!({
+                "revision":created["data"]["revision"],"status":"in_progress",
+                "progress_pct":40,"progress_source":"manual"
+            })),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{patched}");
+    assert_eq!(patched["data"]["progress_source"], "manual");
+
+    let (status, settings) = auth.request("GET", "/settings", None, None).await;
+    assert_eq!(status, 200, "{settings}");
+    let (status, updated) = auth
+        .request(
+            "PATCH",
+            "/settings",
+            Some(serde_json::json!({
+                "revision":settings["data"]["revision"],
+                "identity":{"name":"Maya QA","greeting":"Ready","language":"hinglish","tone":"detailed"}
+            })),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{updated}");
+    assert_eq!(updated["data"]["identity"]["language"], "hinglish");
+    assert_eq!(updated["data"]["identity"]["tone"], "detailed");
+
+    let (status, provider) = auth
+        .request(
+            "POST",
+            "/providers",
+            Some(serde_json::json!({
+                "label":"Local mock","kind":"openai_compatible_chat",
+                "protocol":"chat_completions","endpoint":"http://127.0.0.1:9",
+                "local_endpoint_allowed":true,"enabled":true,"billing_mode":"api",
+                "timeout_ms":30000,"owner_ack":true
+            })),
+            None,
+        )
+        .await;
+    assert_eq!(status, 201, "{provider}");
+    let provider_id = provider["data"]["id"].as_str().unwrap();
+    let (status, invalid_model) = auth
+        .request(
+            "POST",
+            "/models",
+            Some(serde_json::json!({
+                "provider_id":provider_id,"model_id":"mock-invalid","label":"Invalid",
+                "enabled":true,"capabilities":["text"],"context_limit_bytes":1048576
+            })),
+            None,
+        )
+        .await;
+    assert_eq!(status, 400, "{invalid_model}");
+    let (status, model) = auth
+        .request(
+            "POST",
+            "/models",
+            Some(serde_json::json!({
+                "provider_id":provider_id,"model_id":"mock-chat","label":"Mock chat",
+                "enabled":true,"capabilities":["text"],"context_limit_bytes":32768
+            })),
+            None,
+        )
+        .await;
+    assert_eq!(status, 201, "{model}");
+    assert_eq!(model["data"]["context_limit_bytes"], 32768);
+    let (status, secret_status) = auth
+        .request(
+            "POST",
+            &format!("/providers/{provider_id}/secret"),
+            Some(serde_json::json!({"secret":"test-only-credential","mode":"session"})),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{secret_status}");
+    assert_eq!(secret_status["data"]["credential_status"], "session");
+    assert!(!secret_status.to_string().contains("test-only-credential"));
+
+    let (status, report) = auth
+        .request(
+            "GET",
+            "/reports/weekly?week=2020-W53&timezone=UTC",
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{report}");
 }

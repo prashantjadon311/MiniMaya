@@ -58,6 +58,8 @@ impl ExecutionPermit {
         }
     }
 
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
     pub fn new_test_permit(
         job_id: Id,
         step_id: Id,

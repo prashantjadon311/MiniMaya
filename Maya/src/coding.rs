@@ -101,6 +101,12 @@ impl CodingRunner for ApiEditRunner {
                 )
             })?;
 
+            if request.stage.baseline_digest != request.plan.baseline_digest {
+                return Err(AppError::new(
+                    ErrorCode::PlanChanged,
+                    "Staged project baseline does not match the approved plan",
+                ));
+            }
             let change_set = validate_manifest(&manifest, &request.plan)?;
 
             // Apply edits to staged project
@@ -159,7 +165,7 @@ impl CodingService {
     }
 }
 
-pub fn validate_manifest(manifest: &EditManifest, _plan: &Plan) -> Result<ChangeSet> {
+pub fn validate_manifest(manifest: &EditManifest, plan: &Plan) -> Result<ChangeSet> {
     if manifest.schema_version != 1 {
         return Err(AppError::new(
             ErrorCode::InvalidPlan,
@@ -170,11 +176,31 @@ pub fn validate_manifest(manifest: &EditManifest, _plan: &Plan) -> Result<Change
         ));
     }
 
+    if !plan.actions.contains(&ActionClass::ProjectEdit) {
+        return Err(AppError::new(
+            ErrorCode::ActionDenied,
+            "The approved plan does not authorize project edits",
+        ));
+    }
+    if manifest.changes.is_empty() || manifest.changes.len() > 100 {
+        return Err(AppError::new(
+            ErrorCode::InvalidPlan,
+            "Edit manifest must contain between 1 and 100 changes",
+        ));
+    }
+
     let mut seen_paths = HashSet::new();
     let mut changes = Vec::new();
+    let mut content_bytes = 0usize;
 
     for change in &manifest.changes {
         let clean_path = normalize_manifest_path(&change.path)?;
+        if !plan_path_allows(plan, &clean_path) {
+            return Err(AppError::new(
+                ErrorCode::ScopeDenied,
+                format!("Manifest path is outside the approved plan: {clean_path}"),
+            ));
+        }
 
         if !seen_paths.insert(clean_path.clone()) {
             return Err(AppError::new(
@@ -185,12 +211,19 @@ pub fn validate_manifest(manifest: &EditManifest, _plan: &Plan) -> Result<Change
 
         match change.operation {
             EditManifestOperation::Create => {
+                if change.expected_before_sha256.is_some() {
+                    return Err(AppError::new(
+                        ErrorCode::InvalidPlan,
+                        "Create change cannot declare a preimage hash",
+                    ));
+                }
                 let content = change.content_utf8.as_ref().ok_or_else(|| {
                     AppError::new(
                         ErrorCode::InvalidPlan,
                         "Create change must have content_utf8",
                     )
                 })?;
+                content_bytes = content_bytes.saturating_add(content.len());
 
                 let after_digest = compute_sha256(content.as_bytes());
                 changes.push(FileChange {
@@ -203,28 +236,47 @@ pub fn validate_manifest(manifest: &EditManifest, _plan: &Plan) -> Result<Change
                 });
             }
             EditManifestOperation::Replace => {
+                let before = change.expected_before_sha256.ok_or_else(|| {
+                    AppError::new(
+                        ErrorCode::InvalidPlan,
+                        "Replace change requires an exact preimage hash",
+                    )
+                })?;
                 let content = change.content_utf8.as_ref().ok_or_else(|| {
                     AppError::new(
                         ErrorCode::InvalidPlan,
                         "Replace change must have content_utf8",
                     )
                 })?;
+                content_bytes = content_bytes.saturating_add(content.len());
 
                 let after_digest = compute_sha256(content.as_bytes());
                 changes.push(FileChange {
                     path: clean_path,
                     kind: FileChangeKind::Modify,
-                    before: change.expected_before_sha256,
+                    before: Some(before),
                     after: Some(after_digest),
                     artifact_id: None,
                     mode: 0o644,
                 });
             }
             EditManifestOperation::Delete => {
+                if change.content_utf8.is_some() {
+                    return Err(AppError::new(
+                        ErrorCode::InvalidPlan,
+                        "Delete change cannot include replacement content",
+                    ));
+                }
+                let before = change.expected_before_sha256.ok_or_else(|| {
+                    AppError::new(
+                        ErrorCode::InvalidPlan,
+                        "Delete change requires an exact preimage hash",
+                    )
+                })?;
                 changes.push(FileChange {
                     path: clean_path,
                     kind: FileChangeKind::Delete,
-                    before: change.expected_before_sha256,
+                    before: Some(before),
                     after: None,
                     artifact_id: None,
                     mode: 0o644,
@@ -232,11 +284,17 @@ pub fn validate_manifest(manifest: &EditManifest, _plan: &Plan) -> Result<Change
             }
         }
     }
+    if content_bytes > 2 * 1024 * 1024 {
+        return Err(AppError::new(
+            ErrorCode::OutputLimit,
+            "Edit manifest content exceeds 2 MiB",
+        ));
+    }
 
-    let cs_digest = compute_changeset_digest(&changes);
+    let cs_digest = compute_changeset_digest(plan.baseline_digest, &changes);
 
     Ok(ChangeSet {
-        baseline_digest: compute_sha256(b"baseline"),
+        baseline_digest: plan.baseline_digest,
         changes,
         digest: cs_digest,
     })
@@ -245,7 +303,50 @@ pub fn validate_manifest(manifest: &EditManifest, _plan: &Plan) -> Result<Change
 pub fn apply_manifest_to_stage(stage: &StagedProject, manifest: &EditManifest) -> Result<()> {
     for change in &manifest.changes {
         let rel_path = normalize_manifest_path(&change.path)?;
-        let full_path = stage.path.join(&rel_path);
+        let full_path = checked_stage_path(stage, &rel_path)?;
+        match change.operation {
+            EditManifestOperation::Create => {
+                if fs::symlink_metadata(&full_path).is_ok() {
+                    return Err(AppError::new(
+                        ErrorCode::PlanChanged,
+                        format!("Create target already exists: {rel_path}"),
+                    ));
+                }
+            }
+            EditManifestOperation::Replace | EditManifestOperation::Delete => {
+                let metadata = fs::symlink_metadata(&full_path).map_err(|_| {
+                    AppError::new(
+                        ErrorCode::PlanChanged,
+                        format!("Expected preimage is missing: {rel_path}"),
+                    )
+                })?;
+                if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+                    return Err(AppError::new(
+                        ErrorCode::ScopeDenied,
+                        format!("Manifest target is not a regular file: {rel_path}"),
+                    ));
+                }
+                let expected = change.expected_before_sha256.ok_or_else(|| {
+                    AppError::new(ErrorCode::InvalidPlan, "Preimage hash is required")
+                })?;
+                let actual = compute_sha256(&fs::read(&full_path).map_err(|error| {
+                    AppError::new(
+                        ErrorCode::Internal,
+                        format!("Failed to read stage file: {error}"),
+                    )
+                })?);
+                if actual != expected {
+                    return Err(AppError::new(
+                        ErrorCode::PlanChanged,
+                        format!("Staged preimage changed for {rel_path}"),
+                    ));
+                }
+            }
+        }
+    }
+    for change in &manifest.changes {
+        let rel_path = normalize_manifest_path(&change.path)?;
+        let full_path = checked_stage_path(stage, &rel_path)?;
 
         match change.operation {
             EditManifestOperation::Create | EditManifestOperation::Replace => {
@@ -300,6 +401,7 @@ fn normalize_manifest_path(p: &str) -> Result<String> {
     }
 
     let path = Path::new(trimmed);
+    let mut normalized = std::path::PathBuf::new();
     for component in path.components() {
         match component {
             std::path::Component::ParentDir => {
@@ -314,11 +416,55 @@ fn normalize_manifest_path(p: &str) -> Result<String> {
                     "Absolute paths forbidden",
                 ));
             }
-            std::path::Component::Normal(_) | std::path::Component::CurDir => {}
+            std::path::Component::Normal(value) => normalized.push(value),
+            std::path::Component::CurDir => {}
         }
     }
+    let normalized = normalized.to_string_lossy().into_owned();
+    if normalized.is_empty()
+        || normalized == ".git"
+        || normalized.starts_with(".git/")
+        || normalized == ".env"
+        || normalized.starts_with(".env.")
+        || normalized == ".codex/hooks"
+        || normalized.starts_with(".codex/hooks/")
+    {
+        return Err(AppError::new(
+            ErrorCode::ScopeDenied,
+            "Protected project metadata cannot be edited",
+        ));
+    }
+    Ok(normalized)
+}
 
-    Ok(trimmed.to_string())
+fn plan_path_allows(plan: &Plan, path: &str) -> bool {
+    plan.allowed_paths.iter().any(|allowed| {
+        let allowed = allowed.trim_matches('/');
+        if let Some(prefix) = allowed.strip_suffix("/**") {
+            path == prefix || path.starts_with(&format!("{prefix}/"))
+        } else {
+            path == allowed || path.starts_with(&format!("{allowed}/"))
+        }
+    })
+}
+
+fn checked_stage_path(stage: &StagedProject, relative: &str) -> Result<std::path::PathBuf> {
+    let mut current = stage.path.clone();
+    for component in Path::new(relative).components() {
+        let std::path::Component::Normal(part) = component else {
+            return Err(AppError::new(ErrorCode::ScopeDenied, "Invalid staged path"));
+        };
+        current.push(part);
+        if let Ok(metadata) = fs::symlink_metadata(&current)
+            && metadata.file_type().is_symlink()
+        {
+            return Err(AppError::new(
+                ErrorCode::ScopeDenied,
+                format!("Symbolic links are forbidden in staged path: {relative}"),
+            ));
+        }
+    }
+    Ok(current)
 }
 
 fn compute_sha256(bytes: &[u8]) -> Digest {
@@ -327,8 +473,9 @@ fn compute_sha256(bytes: &[u8]) -> Digest {
     Digest::new(hasher.finalize().into())
 }
 
-fn compute_changeset_digest(files: &[FileChange]) -> Digest {
+fn compute_changeset_digest(baseline: Digest, files: &[FileChange]) -> Digest {
     let mut hasher = Sha256::new();
+    hasher.update(baseline.as_bytes());
     for f in files {
         hasher.update(f.path.as_bytes());
         match f.kind {

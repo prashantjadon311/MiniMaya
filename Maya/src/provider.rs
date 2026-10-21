@@ -203,6 +203,7 @@ impl ProviderRegistry {
     }
 
     pub async fn create_provider(&self, input: ProviderInput) -> Result<Provider> {
+        validate_provider_input(&input)?;
         let id = Uuid::new_v4();
         let id_str = id.to_string();
         let now_ms = chrono::Utc::now().timestamp_millis();
@@ -1333,6 +1334,58 @@ impl ProviderRegistry {
             })
             .await
     }
+}
+
+fn validate_provider_input(input: &ProviderInput) -> Result<()> {
+    if !input.owner_ack {
+        return Err(AppError::new(
+            ErrorCode::ActionDenied,
+            "Explicit owner acknowledgement is required",
+        ));
+    }
+    if input.label.trim().is_empty() || input.label.len() > 80 {
+        return Err(AppError::new(
+            ErrorCode::InvalidRequest,
+            "Provider label must be between 1 and 80 bytes",
+        ));
+    }
+    let protocol_valid = match input.kind {
+        ProviderKind::OpenaiResponses => input.protocol == "responses",
+        ProviderKind::OpenaiCompatibleChat => input.protocol == "chat_completions",
+        ProviderKind::Gemini => matches!(
+            input.protocol.as_str(),
+            "gemini_interactions" | "gemini_generate_content"
+        ),
+        ProviderKind::Anthropic => input.protocol == "anthropic_messages",
+    };
+    if !protocol_valid {
+        return Err(AppError::new(
+            ErrorCode::InvalidRequest,
+            "Provider kind and protocol are inconsistent",
+        ));
+    }
+    let endpoint = url::Url::parse(&input.endpoint)
+        .map_err(|_| AppError::new(ErrorCode::InvalidRequest, "Provider endpoint is invalid"))?;
+    if !endpoint.username().is_empty()
+        || endpoint.password().is_some()
+        || endpoint.query().is_some()
+        || endpoint.fragment().is_some()
+        || endpoint.host_str().is_none()
+    {
+        return Err(AppError::new(
+            ErrorCode::InvalidRequest,
+            "Provider endpoint cannot contain credentials, query, or fragment",
+        ));
+    }
+    if endpoint.scheme() != "https"
+        && !(endpoint.scheme() == "http" && input.local_endpoint_allowed)
+    {
+        return Err(AppError::new(
+            ErrorCode::ScopeDenied,
+            "Provider endpoint must use HTTPS unless a local HTTP endpoint is explicitly allowed",
+        ));
+    }
+    Ok(())
 }
 
 fn parse_model_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Model> {

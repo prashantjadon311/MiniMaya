@@ -829,8 +829,7 @@ pub async fn memory_export(
             )
         })?;
     verify_export_binding(&state, approval_id, &body).await?;
-    let permit =
-        permit_for_approval(&state, &owner, approval_id, ActionClass::ExportData).await?;
+    let permit = permit_for_approval(&state, &owner, approval_id, ActionClass::ExportData).await?;
     let artifact = state.memory.export(body, &permit).await?;
     complete_approval_job(&state, approval_id).await?;
     Ok(ApiResponse::created(artifact))

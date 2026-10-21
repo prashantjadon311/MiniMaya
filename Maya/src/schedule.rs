@@ -426,6 +426,27 @@ impl Scheduler {
 
     pub async fn trigger_occurrence(&self, schedule_id: Id, scheduled_at: UtcMs) -> Result<Id> {
         let schedule = self.get_schedule(schedule_id).await?;
+        let existing = self
+            .db
+            .read(move |conn| {
+                let mut statement = conn.prepare(
+                    "SELECT id FROM occurrences WHERE schedule_id = ?1 AND scheduled_at = ?2",
+                )?;
+                let mut rows = statement.query(params![schedule_id.to_string(), scheduled_at])?;
+                Ok(rows
+                    .next()?
+                    .map(|row| row.get::<_, String>(0))
+                    .transpose()?)
+            })
+            .await?;
+        if let Some(existing) = existing {
+            return Uuid::parse_str(&existing).map_err(|_| {
+                AppError::new(
+                    ErrorCode::IntegrityFailure,
+                    "Stored occurrence identifier is invalid",
+                )
+            });
+        }
         let occ_id = Uuid::new_v4();
         let occ_id_str = occ_id.to_string();
         let sid_str = schedule_id.to_string();

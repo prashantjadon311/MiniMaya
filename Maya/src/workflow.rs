@@ -406,12 +406,7 @@ impl WorkflowEngine {
         action: BrowserAction,
         actor: Actor,
     ) -> Result<OperationReceipt> {
-        if !action.owner_ack {
-            return Err(AppError::new(
-                ErrorCode::ActionDenied,
-                "Explicit owner acknowledgement is required",
-            ));
-        }
+        crate::browser::validate_action_preview(&action)?;
         let class = match action.kind {
             BrowserActionKind::Read | BrowserActionKind::Search => ActionClass::BrowserRead,
             BrowserActionKind::Submit => ActionClass::BrowserSubmit,
@@ -544,8 +539,8 @@ impl WorkflowEngine {
     }
 
     pub async fn list(&self, query: JobQuery) -> Result<Page<Job>> {
-        let limit = checked_limit(query.page.limit)? as usize;
-        let cursor = query.page.cursor;
+        let limit = checked_limit(query.limit)? as usize;
+        let cursor = query.cursor;
         let state = query.state.map(enum_text).transpose()?;
         let project_id = query.project_id.map(|value| value.to_string());
         let task_id = query.task_id.map(|value| value.to_string());

@@ -529,14 +529,27 @@ async fn test_x33_export_endpoint_rejects_mismatch_then_consumes_exact_approval(
 async fn test_x41_workspace_task_payloads_roundtrip_through_real_handlers() {
     let (dir, app) = app().await;
     let auth = authenticated(&app).await;
-    let due_at = 1_798_070_400_000_i64;
+    let due_at = 1_797_984_000_000_i64;
+    let (status, invalid_time) = auth
+        .request(
+            "POST",
+            "/tasks",
+            Some(serde_json::json!({
+                "title":"Invalid wire time","description":"","project_id":null,
+                "parent_task_id":null,"priority":"normal","due_at":due_at,
+                "timezone":"Asia/Kolkata","estimated_minutes":null,"reminder":null
+            })),
+            None,
+        )
+        .await;
+    assert_eq!(status, 400, "{invalid_time}");
     let (status, created) = auth
         .request(
             "POST",
             "/tasks",
             Some(serde_json::json!({
                 "title":"Frontend contract task","description":"","project_id":null,
-                "parent_task_id":null,"priority":"normal","due_at":due_at,
+                "parent_task_id":null,"priority":"normal","due_at":"2026-12-23T00:00:00Z",
                 "timezone":"Asia/Kolkata","estimated_minutes":null,"reminder":null
             })),
             None,
@@ -558,6 +571,18 @@ async fn test_x41_workspace_task_payloads_roundtrip_through_real_handlers() {
         .await;
     assert_eq!(status, 200, "{patched}");
     assert_eq!(patched["data"]["progress_source"], "manual");
+    let (status, cleared) = auth
+        .request(
+            "PATCH",
+            &format!("/tasks/{task_id}"),
+            Some(serde_json::json!({
+                "revision":patched["data"]["revision"],"due_at":null
+            })),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{cleared}");
+    assert!(cleared["data"]["due_at"].is_null());
 
     let (status, settings) = auth.request("GET", "/settings", None, None).await;
     assert_eq!(status, 200, "{settings}");

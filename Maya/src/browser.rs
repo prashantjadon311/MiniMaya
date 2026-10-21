@@ -170,14 +170,11 @@ impl BrowserService {
             let target_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
             if target_type == "page" && !id.is_empty() {
-                let mut capabilities = vec![
+                let capabilities = vec![
                     BrowserTabCapability::Open,
                     BrowserTabCapability::Read,
                     BrowserTabCapability::Close,
                 ];
-                if supported_chat_site(&url) {
-                    capabilities.push(BrowserTabCapability::Submit);
-                }
                 tabs.push(BrowserTab {
                     id,
                     url,
@@ -343,83 +340,10 @@ impl BrowserService {
                     exit: None,
                 })
             }
-            BrowserActionKind::Submit => {
-                let tab_id = input.tab_id.ok_or_else(|| {
-                    AppError::new(ErrorCode::InvalidRequest, "tab_id is required for submit")
-                })?;
-                let prompt = input.prompt.unwrap_or_default();
-                if prompt.is_empty() || prompt.len() > 65536 {
-                    return Err(AppError::new(
-                        ErrorCode::InvalidRequest,
-                        "Prompt must be between 1 and 65536 bytes",
-                    ));
-                }
-                let target = cdp_target(&cdp, &tab_id).await?;
-                let url = target
-                    .get("url")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or_default();
-                let (selector, send_selector) = if url.starts_with("https://chatgpt.com/") {
-                    ("#prompt-textarea", "button[data-testid='send-button']")
-                } else if url.starts_with("https://gemini.google.com/") {
-                    (
-                        "[contenteditable='true']",
-                        "button[aria-label='Send message']",
-                    )
-                } else if url.starts_with("https://claude.ai/") {
-                    (
-                        "[contenteditable='true']",
-                        "button[aria-label='Send Message']",
-                    )
-                } else {
-                    return Err(AppError::new(
-                        ErrorCode::UnsupportedCapability,
-                        "Submit is supported only for the configured ChatGPT, Gemini, and Claude site adapters",
-                    ));
-                };
-                let ws = target
-                    .get("webSocketDebuggerUrl")
-                    .and_then(|value| value.as_str())
-                    .ok_or_else(|| {
-                        AppError::new(
-                            ErrorCode::UnsupportedCapability,
-                            "CDP target has no debugger socket",
-                        )
-                    })?;
-                let selector_json = serde_json::to_string(selector)
-                    .map_err(|error| AppError::new(ErrorCode::Internal, error.to_string()))?;
-                let send_selector_json = serde_json::to_string(send_selector)
-                    .map_err(|error| AppError::new(ErrorCode::Internal, error.to_string()))?;
-                let prompt_json = serde_json::to_string(&prompt)
-                    .map_err(|error| AppError::new(ErrorCode::Internal, error.to_string()))?;
-                let expression = format!(
-                    "(()=>{{const e=document.querySelector({selector_json});if(!e)return false;e.focus();if('value'in e)e.value={prompt_json};else e.textContent={prompt_json};e.dispatchEvent(new InputEvent('input',{{bubbles:true,inputType:'insertText',data:{prompt_json}}}));const s=document.querySelector({send_selector_json});if(!s||s.disabled)return false;s.click();return true;}})()"
-                );
-                let value = cdp_command(
-                    ws,
-                    "Runtime.evaluate",
-                    json!({"expression":expression,"returnByValue":true}),
-                )
-                .await?;
-                if value
-                    .pointer("/result/result/value")
-                    .and_then(|item| item.as_bool())
-                    != Some(true)
-                {
-                    return Err(AppError::new(
-                        ErrorCode::ToolFailed,
-                        "The supported prompt field was not found",
-                    ));
-                }
-                Ok(OperationResult {
-                    kind: "browser_submit".to_string(),
-                    message: format!("Submitted prompt to tab {}: {} chars", tab_id, prompt.len()),
-                    artifact_id: None,
-                    text: None,
-                    tab_id: Some(tab_id),
-                    exit: None,
-                })
-            }
+            BrowserActionKind::Submit => Err(AppError::new(
+                ErrorCode::UnsupportedCapability,
+                "Automated website prompt submission is unavailable. Use an official API or manual handoff.",
+            )),
             BrowserActionKind::Close => {
                 let tab_id = input.tab_id.ok_or_else(|| {
                     AppError::new(ErrorCode::InvalidRequest, "tab_id is required for close")
@@ -496,6 +420,58 @@ impl BrowserService {
                 }
             })
             .await
+    }
+}
+
+pub(crate) fn validate_action_preview(input: &BrowserAction) -> Result<()> {
+    if !input.owner_ack {
+        return Err(AppError::new(
+            ErrorCode::ActionDenied,
+            "Explicit owner acknowledgement is required",
+        ));
+    }
+    match input.kind {
+        BrowserActionKind::Open => {
+            let url = input.url.as_deref().ok_or_else(|| {
+                AppError::new(ErrorCode::InvalidRequest, "url is required for open")
+            })?;
+            validate_browser_url_literal(url)
+        }
+        BrowserActionKind::Shortcut => {
+            if input.site.is_none() {
+                return Err(AppError::new(
+                    ErrorCode::InvalidRequest,
+                    "site is required for a browser shortcut",
+                ));
+            }
+            Ok(())
+        }
+        BrowserActionKind::Search => {
+            let query = input.query.as_deref().unwrap_or_default().trim();
+            if query.is_empty() || query.len() > 200 {
+                return Err(AppError::new(
+                    ErrorCode::InvalidRequest,
+                    "Search query must be between 1 and 200 bytes",
+                ));
+            }
+            Ok(())
+        }
+        BrowserActionKind::Read | BrowserActionKind::Close => {
+            if input.tab_id.as_deref().unwrap_or_default().is_empty() {
+                return Err(AppError::new(
+                    ErrorCode::InvalidRequest,
+                    "tab_id is required for this browser action",
+                ));
+            }
+            if let Some(url) = input.url.as_deref() {
+                validate_browser_url_literal(url)?;
+            }
+            Ok(())
+        }
+        BrowserActionKind::Submit => Err(AppError::new(
+            ErrorCode::UnsupportedCapability,
+            "Automated website prompt submission is unavailable. Use an official API or manual handoff.",
+        )),
     }
 }
 
@@ -595,11 +571,6 @@ fn validate_cdp_websocket_url(value: &str) -> Result<()> {
         ));
     }
     Ok(())
-}
-fn supported_chat_site(value: &str) -> bool {
-    value.starts_with("https://chatgpt.com/")
-        || value.starts_with("https://gemini.google.com/")
-        || value.starts_with("https://claude.ai/")
 }
 fn private_address(ip: IpAddr) -> bool {
     match ip {

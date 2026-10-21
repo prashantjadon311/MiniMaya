@@ -1,11 +1,11 @@
 import {el,showError,formatTime} from './dom.js';
 import {request} from './api.js';
 
-export function dueAtMillis(value){
+export function dueAtRfc3339(value){
   if(!value)return null;
-  const millis=new Date(value).getTime();
-  if(!Number.isFinite(millis))throw new Error('Due date is invalid');
-  return Math.trunc(millis);
+  const date=new Date(value);
+  if(!Number.isFinite(date.getTime()))throw new Error('Due date is invalid');
+  return date.toISOString();
 }
 
 export function isoWeek(date=new Date()){
@@ -43,6 +43,6 @@ export async function mount(container){
   const reload=async()=>{try{const page=await request('GET','/tasks?limit=50');list.replaceChildren(...page.items.map(task=>taskCard(task,reload)))}catch(error){showError(list,error)}};
   const loadReport=async period=>{try{report.textContent=JSON.stringify(await showReport(period),null,2)}catch(error){showError(report,error)}};
   daily.addEventListener('click',()=>loadReport('daily'));weekly.addEventListener('click',()=>loadReport('weekly'));
-  create.addEventListener('submit',async event=>{event.preventDefault();if(!title.value.trim())return;add.disabled=true;try{const timezone=Intl.DateTimeFormat().resolvedOptions().timeZone;await request('POST','/tasks',{title:title.value.trim(),description:'',project_id:null,parent_task_id:null,priority:'normal',due_at:dueAtMillis(due.value),timezone,estimated_minutes:null,reminder:null});title.value='';due.value='';await reload()}catch(error){showError(list,error)}finally{add.disabled=false}});
+  create.addEventListener('submit',async event=>{event.preventDefault();if(!title.value.trim())return;add.disabled=true;try{const timezone=Intl.DateTimeFormat().resolvedOptions().timeZone;await request('POST','/tasks',{title:title.value.trim(),description:'',project_id:null,parent_task_id:null,priority:'normal',due_at:dueAtRfc3339(due.value),timezone,estimated_minutes:null,reminder:null});title.value='';due.value='';await reload()}catch(error){showError(list,error)}finally{add.disabled=false}});
   await reload();return()=>{};
 }

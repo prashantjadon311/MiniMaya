@@ -4,6 +4,31 @@ use crate::types::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+mod double_option {
+    use serde::{Deserialize, Deserializer};
+
+    pub fn deserialize<'de, D, T>(
+        deserializer: D,
+    ) -> std::result::Result<Option<Option<T>>, D::Error>
+    where
+        D: Deserializer<'de>,
+        T: Deserialize<'de>,
+    {
+        Option::<T>::deserialize(deserializer).map(Some)
+    }
+}
+
+fn parse_rfc3339(value: &str, field: &'static str) -> Result<UtcMs> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|parsed| parsed.timestamp_millis())
+        .map_err(|_| {
+            AppError::new(
+                ErrorCode::InvalidRequest,
+                format!("{field} must be RFC3339 with an explicit UTC offset"),
+            )
+        })
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ApiMeta {
     pub request_id: Uuid,
@@ -94,6 +119,186 @@ pub struct SettingsPatch {
     pub browser: Option<BrowserSettings>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduleInput {
+    pub task_id: Option<Id>,
+    pub kind: ScheduleKind,
+    pub label: String,
+    pub first_at: String,
+    pub timezone: String,
+    pub recurrence: Recurrence,
+    pub weekdays: Vec<u8>,
+    pub local_time: String,
+    pub enabled: bool,
+}
+
+impl TryFrom<ScheduleInput> for ScheduleDraft {
+    type Error = AppError;
+
+    fn try_from(value: ScheduleInput) -> Result<Self> {
+        Ok(Self {
+            task_id: value.task_id,
+            kind: value.kind,
+            label: value.label,
+            first_at: parse_rfc3339(&value.first_at, "first_at")?,
+            timezone: value.timezone,
+            recurrence: value.recurrence,
+            weekdays: value.weekdays,
+            local_time: value.local_time,
+            enabled: value.enabled,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskInput {
+    pub title: String,
+    pub description: String,
+    pub project_id: Option<Id>,
+    pub parent_task_id: Option<Id>,
+    pub priority: Priority,
+    pub due_at: Option<String>,
+    pub timezone: String,
+    pub estimated_minutes: Option<u32>,
+    pub reminder: Option<ScheduleInput>,
+}
+
+impl TryFrom<TaskInput> for TaskDraft {
+    type Error = AppError;
+
+    fn try_from(value: TaskInput) -> Result<Self> {
+        Ok(Self {
+            title: value.title,
+            description: value.description,
+            project_id: value.project_id,
+            parent_task_id: value.parent_task_id,
+            priority: value.priority,
+            due_at: value
+                .due_at
+                .as_deref()
+                .map(|due_at| parse_rfc3339(due_at, "due_at"))
+                .transpose()?,
+            timezone: value.timezone,
+            estimated_minutes: value.estimated_minutes,
+            reminder: value.reminder.map(TryInto::try_into).transpose()?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskPatchInput {
+    pub revision: Revision,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    #[serde(default, deserialize_with = "double_option::deserialize")]
+    pub project_id: Option<Option<Id>>,
+    #[serde(default, deserialize_with = "double_option::deserialize")]
+    pub parent_task_id: Option<Option<Id>>,
+    pub priority: Option<Priority>,
+    #[serde(default, deserialize_with = "double_option::deserialize")]
+    pub due_at: Option<Option<String>>,
+    pub timezone: Option<String>,
+    #[serde(default, deserialize_with = "double_option::deserialize")]
+    pub estimated_minutes: Option<Option<u32>>,
+    pub status: Option<TaskStatus>,
+    #[serde(default, deserialize_with = "double_option::deserialize")]
+    pub progress_pct: Option<Option<u8>>,
+    #[serde(default, deserialize_with = "double_option::deserialize")]
+    pub progress_source: Option<Option<ProgressSource>>,
+    pub checklist: Option<Vec<ChecklistItem>>,
+}
+
+impl TryFrom<TaskPatchInput> for TaskPatch {
+    type Error = AppError;
+
+    fn try_from(value: TaskPatchInput) -> Result<Self> {
+        let due_at = value
+            .due_at
+            .map(|timestamp| {
+                timestamp
+                    .as_deref()
+                    .map(|timestamp| parse_rfc3339(timestamp, "due_at"))
+                    .transpose()
+            })
+            .transpose()?;
+        Ok(Self {
+            revision: value.revision,
+            title: value.title,
+            description: value.description,
+            project_id: value.project_id,
+            parent_task_id: value.parent_task_id,
+            priority: value.priority,
+            due_at,
+            timezone: value.timezone,
+            estimated_minutes: value.estimated_minutes,
+            status: value.status,
+            progress_pct: value.progress_pct,
+            progress_source: value.progress_source,
+            checklist: value.checklist,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SchedulePatchInput {
+    pub revision: Revision,
+    #[serde(default, deserialize_with = "double_option::deserialize")]
+    pub task_id: Option<Option<Id>>,
+    pub label: Option<String>,
+    pub first_at: Option<String>,
+    pub timezone: Option<String>,
+    pub recurrence: Option<Recurrence>,
+    pub weekdays: Option<Vec<u8>>,
+    pub local_time: Option<String>,
+    pub enabled: Option<bool>,
+}
+
+impl TryFrom<SchedulePatchInput> for SchedulePatch {
+    type Error = AppError;
+
+    fn try_from(value: SchedulePatchInput) -> Result<Self> {
+        Ok(Self {
+            revision: value.revision,
+            task_id: value.task_id,
+            label: value.label,
+            first_at: value
+                .first_at
+                .as_deref()
+                .map(|first_at| parse_rfc3339(first_at, "first_at"))
+                .transpose()?,
+            timezone: value.timezone,
+            recurrence: value.recurrence,
+            weekdays: value.weekdays,
+            local_time: value.local_time,
+            enabled: value.enabled,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UserMessageInput {
+    pub text: String,
+    pub model_override_id: Option<Id>,
+    pub confirmed_task: Option<TaskInput>,
+}
+
+impl TryFrom<UserMessageInput> for UserMessage {
+    type Error = AppError;
+
+    fn try_from(value: UserMessageInput) -> Result<Self> {
+        Ok(Self {
+            text: value.text,
+            model_override_id: value.model_override_id,
+            confirmed_task: value.confirmed_task.map(TryInto::try_into).transpose()?,
+        })
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SecretWrite {
@@ -116,8 +321,8 @@ pub struct ConfirmRevision {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelQuery {
-    #[serde(flatten)]
-    pub page: ListQuery,
+    pub limit: Option<u16>,
+    pub cursor: Option<String>,
     pub provider_id: Option<Id>,
 }
 
@@ -138,8 +343,8 @@ pub struct CommandInput {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommandQuery {
-    #[serde(flatten)]
-    pub page: ListQuery,
+    pub limit: Option<u16>,
+    pub cursor: Option<String>,
     pub project_id: Option<Id>,
 }
 
@@ -154,8 +359,8 @@ pub struct EventInput {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScheduleQuery {
-    #[serde(flatten)]
-    pub page: ListQuery,
+    pub limit: Option<u16>,
+    pub cursor: Option<String>,
     pub task_id: Option<Id>,
     pub kind: Option<ScheduleKind>,
 }
@@ -190,8 +395,8 @@ pub struct WeeklyReportQuery {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JobQuery {
-    #[serde(flatten)]
-    pub page: ListQuery,
+    pub limit: Option<u16>,
+    pub cursor: Option<String>,
     pub state: Option<JobState>,
     pub project_id: Option<Id>,
     pub task_id: Option<Id>,
@@ -283,8 +488,8 @@ pub struct VoiceMeta {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UsageQuery {
-    #[serde(flatten)]
-    pub page: ListQuery,
+    pub limit: Option<u16>,
+    pub cursor: Option<String>,
     pub provider_id: Option<Id>,
     pub job_id: Option<Id>,
     pub since: Option<UtcMs>,

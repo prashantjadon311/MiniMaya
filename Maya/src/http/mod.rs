@@ -241,7 +241,20 @@ pub fn router(state: Arc<AppState>) -> Router {
             header::CONTENT_SECURITY_POLICY,
             HeaderValue::from_static("default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; media-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"),
         ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            validate_transport,
+        ))
         .with_state(state)
+}
+
+async fn validate_transport(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Result<Response> {
+    validate_host_and_origin(&state, &request)?;
+    Ok(next.run(request).await)
 }
 
 async fn protect(

@@ -254,7 +254,7 @@ pub async fn models_list(
     Extension(_): Extension<SessionContext>,
     Query(q): Query<ModelQuery>,
 ) -> Result<ApiResponse<Page<Model>>> {
-    let limit = checked_limit(q.page.limit)? as usize;
+    let limit = checked_limit(q.limit)? as usize;
     let mut items = state.providers.list_models(q.provider_id).await?;
     items.truncate(limit);
     Ok(ApiResponse::ok(Page {
@@ -528,10 +528,13 @@ pub async fn tasks_list(
 pub async fn tasks_create(
     State(state): State<Arc<AppState>>,
     Extension(owner): Extension<SessionContext>,
-    Json(body): Json<TaskDraft>,
+    Json(body): Json<TaskInput>,
 ) -> Result<ApiResponse<Task>> {
     Ok(ApiResponse::created(
-        state.tasks.create(body, owner_actor(&owner)).await?,
+        state
+            .tasks
+            .create(body.try_into()?, owner_actor(&owner))
+            .await?,
     ))
 }
 pub async fn tasks_get(
@@ -545,10 +548,19 @@ pub async fn tasks_patch(
     State(state): State<Arc<AppState>>,
     Extension(owner): Extension<SessionContext>,
     Path(p): Path<IdPath>,
-    Json(body): Json<TaskPatch>,
+    Json(body): Json<TaskPatchInput>,
 ) -> Result<ApiResponse<Task>> {
+    if matches!(body.progress_source, Some(Some(source)) if source != ProgressSource::Manual) {
+        return Err(AppError::new(
+            ErrorCode::ActionDenied,
+            "Owner task updates may only record manual progress",
+        ));
+    }
     Ok(ApiResponse::ok(
-        state.tasks.update(p.id, body, owner_actor(&owner)).await?,
+        state
+            .tasks
+            .update(p.id, body.try_into()?, owner_actor(&owner))
+            .await?,
     ))
 }
 pub async fn task_events(
@@ -621,7 +633,7 @@ pub async fn schedules_list(
     Extension(_): Extension<SessionContext>,
     Query(q): Query<ScheduleQuery>,
 ) -> Result<ApiResponse<Page<Schedule>>> {
-    let limit = checked_limit(q.page.limit)? as usize;
+    let limit = checked_limit(q.limit)? as usize;
     let mut items = state.scheduler.list_schedules().await?;
     items.retain(|s| {
         q.task_id.is_none_or(|id| s.task_id == Some(id)) && q.kind.is_none_or(|kind| s.kind == kind)
@@ -635,9 +647,9 @@ pub async fn schedules_list(
 pub async fn schedules_create(
     State(state): State<Arc<AppState>>,
     Extension(_): Extension<SessionContext>,
-    Json(body): Json<ScheduleDraft>,
+    Json(body): Json<ScheduleInput>,
 ) -> Result<ApiResponse<Schedule>> {
-    let schedule = state.scheduler.create_schedule(body).await?;
+    let schedule = state.scheduler.create_schedule(body.try_into()?).await?;
     let _ = state
         .schedule_wake
         .send(SchedulerWake::Changed(schedule.id))
@@ -648,9 +660,12 @@ pub async fn schedules_patch(
     State(state): State<Arc<AppState>>,
     Extension(_): Extension<SessionContext>,
     Path(p): Path<IdPath>,
-    Json(body): Json<SchedulePatch>,
+    Json(body): Json<SchedulePatchInput>,
 ) -> Result<ApiResponse<Schedule>> {
-    let schedule = state.scheduler.patch_schedule(p.id, body).await?;
+    let schedule = state
+        .scheduler
+        .patch_schedule(p.id, body.try_into()?)
+        .await?;
     let _ = state
         .schedule_wake
         .send(SchedulerWake::Changed(schedule.id))
@@ -766,9 +781,12 @@ pub async fn message_send(
     State(state): State<Arc<AppState>>,
     Extension(owner): Extension<SessionContext>,
     Path(p): Path<IdPath>,
-    Json(body): Json<UserMessage>,
+    Json(body): Json<UserMessageInput>,
 ) -> Result<ApiResponse<MessageReceipt>> {
-    let receipt = state.assistant.receive(p.id, body, &owner).await?;
+    let receipt = state
+        .assistant
+        .receive(p.id, body.try_into()?, &owner)
+        .await?;
     if let Some(job_id) = receipt.job_id {
         let workflow = state.workflow.clone();
         tokio::spawn(async move {
@@ -1418,7 +1436,7 @@ async fn tool_capability(state: &AppState, id: Id) -> Result<Capability> {
 }
 
 async fn list_commands(state: &AppState, q: CommandQuery) -> Result<Page<CommandSpec>> {
-    let limit = checked_limit(q.page.limit)? as usize;
+    let limit = checked_limit(q.limit)? as usize;
     let pid = q.project_id.map(|id| id.to_string());
     state.db.read(move|conn|{let mut sql="SELECT id,project_id,label,executable,args_json,timeout_ms,network,enabled,kind,revision FROM command_specs WHERE 1=1".to_string();let mut values=Vec::<Value>::new();if let Some(pid)=pid{sql.push_str(" AND project_id=?");values.push(pid.into());}sql.push_str(" ORDER BY id LIMIT ?");values.push(((limit+1)as i64).into());let refs:Vec<&dyn rusqlite::ToSql>=values.iter().map(|v|v as _).collect();let mut stmt=conn.prepare(&sql).map_err(db_error)?;let items=stmt.query_map(refs.as_slice(),parse_command).map_err(db_error)?.collect::<std::result::Result<Vec<_>,_>>().map_err(db_error)?;Ok(Page{items:items.into_iter().take(limit).collect(),next_cursor:None})}).await
 }
@@ -1488,7 +1506,7 @@ async fn verify_checkin_task(state: &AppState, checkin: Id, task: Id) -> Result<
 }
 
 async fn list_usage(state: &AppState, q: UsageQuery) -> Result<Page<UsageRecord>> {
-    let limit = checked_limit(q.page.limit)? as usize;
+    let limit = checked_limit(q.limit)? as usize;
     let pid = q.provider_id.map(|v| v.to_string());
     let jid = q.job_id.map(|v| v.to_string());
     state

@@ -66,10 +66,10 @@ assert.match(chat,/Open Activity for recovery details/,'Chat must surface recove
 const taskModule=pathToFileURL(path.join(root,'web/js/tasks.js')).href;
 const taskUnit=spawnSync(process.execPath,['--input-type=module','-e',`
   import assert from 'node:assert/strict';
-  import {isoWeek,dueAtMillis,progressPatch} from ${JSON.stringify(taskModule)};
+  import {isoWeek,dueAtRfc3339,progressPatch} from ${JSON.stringify(taskModule)};
   assert.equal(isoWeek(new Date('2021-01-01T12:00:00Z')),'2020-W53');
-  assert.equal(dueAtMillis(''),null);
-  assert.equal(typeof dueAtMillis('2026-10-21T15:30'),'number');
+  assert.equal(dueAtRfc3339(''),null);
+  assert.match(dueAtRfc3339('2026-10-21T15:30'),/^2026-10-21T/);
   assert.deepEqual(progressPatch({id:'task',revision:4},40,'in_progress'),{revision:4,status:'in_progress',progress_pct:40,progress_source:'manual'});
 `],{encoding:'utf8'});
 assert.equal(taskUnit.status,0,taskUnit.stderr);

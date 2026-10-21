@@ -1,11 +1,158 @@
 #![allow(dead_code)]
 
+use axum::body::Body;
+use http_body_util::BodyExt;
 use maya_mini::db::Db;
+use maya_mini::{app::App, config::RuntimeConfig, http};
+use serde_json::Value;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 use tempfile::TempDir;
+use tower::ServiceExt;
+
+pub fn runtime_config(root: &std::path::Path) -> RuntimeConfig {
+    RuntimeConfig {
+        data_dir: root.join("data"),
+        cache_dir: root.join("cache"),
+        runtime_dir: root.join("runtime"),
+        port: 0,
+        open_browser: false,
+        headless: true,
+        print_launch_link: false,
+        test_mode: true,
+    }
+}
+
+pub async fn test_app() -> (TempDir, App) {
+    let dir = tempfile::tempdir().expect("temp app dir");
+    let app = App::build(runtime_config(dir.path()))
+        .await
+        .expect("application builds");
+    (dir, app)
+}
+
+#[derive(Clone)]
+pub struct AuthHarness {
+    pub router: axum::Router,
+    pub host: String,
+    pub origin: String,
+    pub bearer: String,
+    pub csrf: String,
+}
+
+impl AuthHarness {
+    pub async fn request(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+    ) -> (axum::http::StatusCode, Value) {
+        self.request_with_headers(method, path, body, &[]).await
+    }
+
+    pub async fn request_with_headers(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+        headers: &[(&str, &str)],
+    ) -> (axum::http::StatusCode, Value) {
+        let mut builder = axum::http::Request::builder()
+            .method(method)
+            .uri(format!("/api/v1{path}"))
+            .header("host", &self.host)
+            .header("authorization", format!("Bearer {}", self.bearer));
+        if !matches!(method, "GET" | "HEAD") {
+            builder = builder
+                .header("origin", &self.origin)
+                .header("x-csrf-token", &self.csrf)
+                .header("idempotency-key", uuid::Uuid::new_v4().to_string())
+                .header("content-type", "application/json");
+        }
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        let response = self
+            .router
+            .clone()
+            .oneshot(
+                builder
+                    .body(body.map_or_else(Body::empty, |value| Body::from(value.to_string())))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request completes");
+        let status = response.status();
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("response body")
+            .to_bytes();
+        let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, value)
+    }
+}
+
+pub async fn authenticated(app: &App) -> AuthHarness {
+    let port = app.state.auth.port();
+    let host = format!("127.0.0.1:{port}");
+    let origin = format!("http://{host}");
+    let router = http::router(app.state.clone());
+    let launch = app
+        .state
+        .auth
+        .issue_launch_link(port)
+        .await
+        .expect("launch link");
+    let bootstrap = launch
+        .url
+        .expose_str()
+        .split("#bootstrap=")
+        .nth(1)
+        .expect("bootstrap token");
+    let response = router
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/v1/session")
+                .header("host", &host)
+                .header("origin", &origin)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"bootstrap_token":bootstrap}).to_string(),
+                ))
+                .expect("session request"),
+        )
+        .await
+        .expect("session exchange");
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let value: Value = serde_json::from_slice(
+        &response
+            .into_body()
+            .collect()
+            .await
+            .expect("session body")
+            .to_bytes(),
+    )
+    .expect("session JSON");
+    AuthHarness {
+        router,
+        host,
+        origin,
+        bearer: value["data"]["session_token"]
+            .as_str()
+            .expect("session token")
+            .to_string(),
+        csrf: value["data"]["csrf_token"]
+            .as_str()
+            .expect("CSRF token")
+            .to_string(),
+    }
+}
 
 pub struct TempProject {
     pub dir: TempDir,

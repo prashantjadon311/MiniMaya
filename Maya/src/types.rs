@@ -5,6 +5,18 @@ use std::fmt;
 use std::str::FromStr;
 use uuid::Uuid;
 
+mod double_option {
+    use serde::{Deserialize, Deserializer};
+
+    pub fn deserialize<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+    where
+        D: Deserializer<'de>,
+        T: Deserialize<'de>,
+    {
+        Option::<T>::deserialize(deserializer).map(Some)
+    }
+}
+
 pub type Id = Uuid;
 pub type UtcMs = i64;
 pub type Revision = i64;
@@ -776,9 +788,17 @@ pub struct ProjectPatch {
     pub excluded_paths: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "double_option::deserialize",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub preferred_model_id: Option<Option<Id>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "double_option::deserialize",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub preferred_tool_id: Option<Option<Id>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub archived: Option<bool>,
@@ -813,11 +833,23 @@ pub struct ConversationInput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConversationPatch {
     pub revision: Revision,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "double_option::deserialize",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub project_id: Option<Option<Id>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "double_option::deserialize",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub model_override_id: Option<Option<Id>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "double_option::deserialize",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub current_task_id: Option<Option<Id>>,
 }
 
@@ -1198,23 +1230,47 @@ pub struct TaskPatch {
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "double_option::deserialize",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub project_id: Option<Option<Id>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "double_option::deserialize",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub parent_task_id: Option<Option<Id>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub priority: Option<Priority>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "double_option::deserialize",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub due_at: Option<Option<UtcMs>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timezone: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "double_option::deserialize",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub estimated_minutes: Option<Option<u32>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<TaskStatus>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "double_option::deserialize",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub progress_pct: Option<Option<u8>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "double_option::deserialize",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub progress_source: Option<Option<ProgressSource>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checklist: Option<Vec<ChecklistItem>>,
@@ -1275,7 +1331,11 @@ pub struct CheckinReply {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SchedulePatch {
     pub revision: Revision,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "double_option::deserialize",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub task_id: Option<Option<Id>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
